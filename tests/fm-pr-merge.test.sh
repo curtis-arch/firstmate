@@ -197,6 +197,56 @@ test_malformed_url_refuses_before_merge() {
   pass "fm-pr-merge refuses malformed PR URLs before calling gh-axi"
 }
 
+test_rejects_unsafe_url_segments_before_recording() {
+  local case_dir rc
+  case_dir=$(make_case unsafe-url-segment)
+  mkdir -p "$case_dir/wt"
+  add_gh_mocks "$case_dir" 8888888888888888888888888888888888888888
+  : > "$case_dir/gh-axi.log"
+
+  set +e
+  run_pr_merge "$case_dir" task-x1 'https://github.com/evil$(echo pwned)/repo/pull/7' \
+    > "$case_dir/stdout" 2> "$case_dir/stderr"
+  rc=$?
+  set -e
+
+  expect_code 1 "$rc" "unsafe-url-segment: fm-pr-merge should refuse unsafe owner/repo characters"
+  assert_grep 'PR URL must match https://github.com/<owner>/<repo>/pull/<number>' "$case_dir/stderr" \
+    "unsafe-url-segment: refusal did not explain the expected URL shape"
+  assert_no_grep 'pr=https://github.com/evil$(echo pwned)/repo/pull/7' "$case_dir/state/task-x1.meta" \
+    "unsafe-url-segment: unsafe PR URL was recorded in meta"
+  assert_absent "$case_dir/state/task-x1.check.sh" \
+    "unsafe-url-segment: unsafe PR URL armed a merge poll"
+  assert_no_grep 'pr merge' "$case_dir/gh-axi.log" \
+    "unsafe-url-segment: gh-axi pr merge was invoked for an unsafe URL"
+  pass "fm-pr-merge refuses unsafe PR URL segments before recording state"
+}
+
+test_repo_override_args_refuse_before_recording() {
+  local case_dir rc
+  case_dir=$(make_case repo-override)
+  mkdir -p "$case_dir/wt"
+  add_gh_mocks "$case_dir" 9999999999999999999999999999999999999999
+  : > "$case_dir/gh-axi.log"
+
+  set +e
+  run_pr_merge "$case_dir" task-x1 https://github.com/right/repo/pull/5 -- --repo wrong/repo \
+    > "$case_dir/stdout" 2> "$case_dir/stderr"
+  rc=$?
+  set -e
+
+  expect_code 1 "$rc" "repo-override: fm-pr-merge should refuse repo override flags"
+  assert_grep 'must not override --repo parsed from PR URL' "$case_dir/stderr" \
+    "repo-override: refusal did not explain the repo override"
+  assert_no_grep 'pr=https://github.com/right/repo/pull/5' "$case_dir/state/task-x1.meta" \
+    "repo-override: PR URL was recorded before rejecting repo override"
+  assert_absent "$case_dir/state/task-x1.check.sh" \
+    "repo-override: repo override armed a merge poll"
+  assert_no_grep 'pr merge' "$case_dir/gh-axi.log" \
+    "repo-override: gh-axi pr merge was invoked despite repo override"
+  pass "fm-pr-merge refuses repo override args before recording state"
+}
+
 test_explicit_merge_method_not_overridden() {
   local case_dir
   case_dir=$(make_case explicit-merge-method)
@@ -247,6 +297,8 @@ test_merge_failure_propagates_after_recording
 test_extra_merge_args_forwarded
 test_missing_meta_refuses_before_merge
 test_malformed_url_refuses_before_merge
+test_rejects_unsafe_url_segments_before_recording
+test_repo_override_args_refuse_before_recording
 test_explicit_merge_method_not_overridden
 test_method_equals_merge_method_not_overridden
 test_parses_pr_url_for_gh_axi

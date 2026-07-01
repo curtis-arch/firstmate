@@ -49,17 +49,33 @@ caller_has_merge_method() {
 
 parse_pr_url() {
   local url=$1
-  if [[ "$url" =~ ^https://github\.com/([^/]+)/([^/]+)/pull/([0-9]+)/?$ ]]; then
+  if [[ "$url" =~ ^https://github\.com/([A-Za-z0-9][A-Za-z0-9-]{0,38})/([A-Za-z0-9._-]+)/pull/([0-9]+)/?$ ]]; then
     PR_OWNER="${BASH_REMATCH[1]}"
     PR_REPO="${BASH_REMATCH[2]}"
     PR_NUMBER="${BASH_REMATCH[3]}"
-    return 0
+    if [[ "$PR_OWNER" != *- ]]; then
+      return 0
+    fi
   fi
   echo "error: PR URL must match https://github.com/<owner>/<repo>/pull/<number> (got: $url)" >&2
   return 1
 }
 
+reject_repo_overrides() {
+  local arg
+  for arg in "$@"; do
+    case "$arg" in
+      --repo|--repo=*|-R|-R?*)
+        echo "error: extra merge args must not override --repo parsed from PR URL (got: $arg)" >&2
+        return 1
+        ;;
+    esac
+  done
+  return 0
+}
+
 parse_pr_url "$URL" || exit 1
+reject_repo_overrides "$@" || exit 1
 
 "$SCRIPT_DIR/fm-pr-check.sh" "$ID" "$URL"
 grep -qxF "pr=$URL" "$META" || { echo "error: fm-pr-check did not record pr=$URL in $META; refusing to merge" >&2; exit 1; }
