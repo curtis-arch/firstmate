@@ -206,6 +206,7 @@ test_rejects_unsafe_url_segments_before_recording() {
   : > "$case_dir/gh-axi.log"
 
   set +e
+  # shellcheck disable=SC2016  # Literal command substitution probes URL parsing safety.
   run_pr_merge "$case_dir" task-x1 'https://github.com/evil$(echo pwned)/repo/pull/7' \
     > "$case_dir/stdout" 2> "$case_dir/stderr"
   rc=$?
@@ -214,6 +215,7 @@ test_rejects_unsafe_url_segments_before_recording() {
   expect_code 1 "$rc" "unsafe-url-segment: fm-pr-merge should refuse unsafe owner/repo characters"
   assert_grep 'PR URL must match https://github.com/<owner>/<repo>/pull/<number>' "$case_dir/stderr" \
     "unsafe-url-segment: refusal did not explain the expected URL shape"
+  # shellcheck disable=SC2016  # Literal command substitution must not reach meta.
   assert_no_grep 'pr=https://github.com/evil$(echo pwned)/repo/pull/7' "$case_dir/state/task-x1.meta" \
     "unsafe-url-segment: unsafe PR URL was recorded in meta"
   assert_absent "$case_dir/state/task-x1.check.sh" \
