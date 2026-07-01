@@ -13,6 +13,7 @@
 #   (e) PR URL is parsed to number + --repo for gh-axi (defaults to --squash)
 #   (f) malformed PR URL fails fast without calling gh-axi
 #   (g) explicit merge method is not overridden by the default --squash
+#   (h) repo override args fail fast because the repo comes from the URL
 set -u
 
 # shellcheck source=tests/lib.sh

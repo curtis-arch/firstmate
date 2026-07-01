@@ -21,6 +21,8 @@
 # Merge method: defaults to --squash when the caller passes none of --squash,
 # --merge, --rebase, or --method after the optional -- separator. An explicit
 # caller method is never overridden.
+# Extra args must not include --repo or -R because the repo is parsed from the
+# PR URL.
 #
 # Usage: fm-pr-merge.sh <task-id> <pr-url> [-- <extra gh-axi pr merge args>]
 set -eu
