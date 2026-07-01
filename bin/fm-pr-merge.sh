@@ -41,7 +41,7 @@ caller_has_merge_method() {
   local arg
   for arg in "$@"; do
     case "$arg" in
-      --squash|--merge|--rebase|--method) return 0 ;;
+      --squash|--merge|--rebase|--method|--method=*) return 0 ;;
     esac
   done
   return 1
@@ -59,10 +59,10 @@ parse_pr_url() {
   return 1
 }
 
+parse_pr_url "$URL" || exit 1
+
 "$SCRIPT_DIR/fm-pr-check.sh" "$ID" "$URL"
 grep -qxF "pr=$URL" "$META" || { echo "error: fm-pr-check did not record pr=$URL in $META; refusing to merge" >&2; exit 1; }
-
-parse_pr_url "$URL" || exit 1
 
 merge_args=()
 if ! caller_has_merge_method "$@"; then
