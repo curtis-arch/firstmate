@@ -54,6 +54,15 @@ Commit durable changes to the shared, tracked material with terse messages.
 This repo is itself behind the no-mistakes gate: ship shared, tracked material through the pipeline - branch, commit, run the pipeline, PR - and the captain's merge rule applies here exactly as it does to projects.
 Never add an agent name as co-author.
 
+### Deploy-time configuration discipline
+
+Default stance: do not add new deploy-time environment variables, secrets, or Wrangler `vars` while shipping ordinary code.
+Every new deploy var is an operational coupling point and an error surface on every push.
+Only introduce one when the work truly requires a runtime-configurable value that cannot be expressed safely as code, a checked-in non-secret constant, or an existing binding.
+When a worker needs another worker, an R2 bucket, a queue, a durable object, Hyperdrive, or another Cloudflare resource, prefer the appropriate Cloudflare binding over a URL or secret env var.
+Do not add URL + shared-secret fallbacks for worker-to-worker calls unless the captain explicitly asks for that deployment mode.
+If a task appears to need a new env var or secret, stop and surface the exact reason, the failure mode it prevents, and the simpler binding/constant alternative before any implementation or PR.
+
 ## 2. Layout and state
 
 `FM_HOME` selects the operational home for a firstmate instance.
