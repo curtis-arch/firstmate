@@ -13,6 +13,7 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and
   A read-only diagnostic against Orca `1.4.137` matched the ship task's exact `orca_worktree_id`, but the result exposed two live terminals and only a `paneKey` for its one working agent, with no relation to Firstmate's recorded `terminal=term_...` handle.
   Working-to-idle transition, clean exit, and plain-shell/no-agent behavior were not observed in an accepted E1 experiment.
   No scout cleanup ran because no scout was created.
+- 2026-07-12: Recorded the shipped-versus-thin Orca liveness boundary in the architecture documentation and added conservative refusal fixtures without changing production backend behavior.
 
 ### Deferred
 
