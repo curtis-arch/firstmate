@@ -1306,21 +1306,24 @@ orca_agents_snapshot_rejects_ok_false_and_malformed_json_without_liveness_claim(
 }
 
 orca_e1_records_exact_worktree_identity_for_scratch_firstmate_task() {
-  local fixture_id recorded_id
-  fixture_id='repo-id::/tmp/fm-e1-scratch'
-  recorded_id='repo-id::/tmp/fm-e1-scratch'
-  [ "$fixture_id" = "$recorded_id" ] || fail "E1 fixture must preserve the complete recorded worktree identity"
+  local evidence
+  evidence=$(cat "$ROOT/docs/orca-backend.md")
+  assert_contains "$evidence" \
+    'orca_worktree_id=69c04545-e3dd-467f-9b35-0eb698cc41a7::/Users/johncurtis/orca/workspaces/firstmate/fm-orca-e1-runtime-scout-e1' \
+    "E1 evidence must retain the scratch scout's complete recorded worktree identity"
+  assert_contains "$evidence" 'E1 proves exact worktree matching' \
+    "E1 decision must state the exact-worktree result"
   pass "orca_e1_records_exact_worktree_identity_for_scratch_firstmate_task"
 }
 
 orca_e1_observes_distinct_working_and_idle_agent_states() {
-  local working idle
-  working=$(printf '%s' '{"state":"working"}' | node -e 'const fs=require("fs"); process.stdout.write(JSON.parse(fs.readFileSync(0,"utf8")).state)')
-  idle=$(printf '%s' '{"state":"idle"}' | node -e 'const fs=require("fs"); process.stdout.write(JSON.parse(fs.readFileSync(0,"utf8")).state)')
-  [ "$working" = working ] || fail "working fixture lost its exact Orca state"
-  [ "$idle" = idle ] || fail "idle fixture lost its exact Orca state"
-  [ "$working" != "$idle" ] || fail "working and idle fixtures must remain distinct"
-  pass "orca_e1_observes_distinct_working_and_idle_agent_states"
+  local evidence
+  evidence=$(cat "$ROOT/docs/orca-backend.md")
+  assert_contains "$evidence" 'directly observed `working` and `done` agent values' \
+    "E1 evidence must state the agent values actually observed"
+  assert_contains "$evidence" 'It does not prove a stable terminal-to-agent identity relation, `idle`' \
+    "E1 evidence must refuse the named working/idle gate when idle was not observed"
+  pass "orca_e1_observes_distinct_working_and_idle_agent_states: refused because idle was not observed"
 }
 
 orca_e1_plain_shell_or_absent_agent_never_claims_alive() {
