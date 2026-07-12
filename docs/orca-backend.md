@@ -179,6 +179,18 @@ This diagnostic proves only exact worktree lookup and one observed `working` val
 It does not prove a `terminal=term_...` to `agents[].paneKey` relation, an `idle` transition, waiting/permission behavior, clean exit, or a safe no-agent/plain-shell result.
 Fixture tests cover conservative fallback behavior, but fixtures are not E1 evidence.
 
+#### E1 decision: refuse
+
+E1 is refused for this round and P1 remains blocked.
+The required disposable Firstmate-created Orca scout was not run because this delegated brief explicitly prohibited the necessary `bin/fm-spawn.sh`, `bin/fm-teardown.sh`, and fleet operations.
+The available ship-task diagnostic also met the rider's ambiguity refusal rule independently: `agents[]` identified an agent by `paneKey`, Firstmate identified its endpoint by `terminal=term_...`, no relation between those identities was present, and the worktree contained two live terminals.
+Choosing the sole returned agent would be a cross-pane guess prohibited by the rider.
+
+Production behavior therefore remains unchanged: Orca busy state and agent liveness both report `unknown`, and existing terminal-tail fallback policy remains in place.
+No Orca worktree cleanup command was run because no E1 scout was created.
+The next eligible work is E1 again under explicit authority to create and guard-teardown a disposable scout, with exact working, idle, clean-exit, and plain-shell/no-agent captures plus a proven terminal-to-agent identity relation.
+E2/P2 durable endpoint re-resolution is not unlocked.
+
 Real-Orca smoke verification was run against `/usr/local/bin/orca` with `/Applications/Orca.app` reporting bundle version `1.4.116`; `orca status --json` reported `result.runtime.reachable=true` and `result.runtime.state="ready"`.
 The verified terminal creation handle field is `result.terminal.handle` from `orca terminal create --json`; worktree creation returned `result.worktree.id` and `result.worktree.path` in the same smoke run.
 Firstmate intentionally ignores speculative terminal-handle shapes such as bare `result.id` and nested `result.worktree.terminal` until a real Orca smoke run proves them.
