@@ -101,12 +101,11 @@ Teardown:
 
 ## Verification
 
-### Semantic liveness E1 observation - not an accepted experiment (2026-07-12)
+### Semantic liveness E1 - refused for P1 (2026-07-12)
 
-At `2026-07-12 13:29:08 CDT`, the delegated implementation task inspected the running Orca environment read-only.
-This was not E1: the observed Firstmate task was `kind=ship`, not the rider-required disposable `kind=scout`, and the delegated brief prohibited `bin/fm-spawn.sh`, `bin/fm-teardown.sh`, and all Firstmate fleet operations.
-No scratch task was created or cleaned up.
-The observation below therefore cannot unlock P1.
+The controlling Firstmate created the disposable Orca-backed scout `orca-e1-runtime-scout-e1`, and the scout captured its own runtime state between `2026-07-12T18:32:09Z` and `2026-07-12T18:32:49Z`.
+The delegated implementation crewmate did not spawn, supervise, or tear down the scout.
+The complete scout-owned report is `/Users/johncurtis/projects/firstmate/data/orca-e1-runtime-scout-e1/report.md`.
 
 The installed application version was read without modifying Orca:
 
@@ -115,82 +114,65 @@ $ /usr/bin/defaults read /Applications/Orca.app/Contents/Info CFBundleShortVersi
 1.4.137
 ```
 
-The runtime was ready:
+The scout reported a ready runtime with runtime ID `923315fe-d6cc-4bc1-9c1f-de30cd45c894`.
+Its exact Firstmate metadata was:
 
-```console
-$ orca status --json | jq '{ok,result:{app:.result.app,runtime:.result.runtime},_meta}'
-{
-  "ok": true,
-  "result": {
-    "app": {
-      "running": true,
-      "pid": 12642
-    },
-    "runtime": {
-      "state": "ready",
-      "reachable": true,
-      "runtimeId": "923315fe-d6cc-4bc1-9c1f-de30cd45c894"
-    }
-  },
-  "_meta": {
-    "runtimeId": "923315fe-d6cc-4bc1-9c1f-de30cd45c894"
-  }
-}
-```
-
-The observed ship task's recorded metadata was:
-
-```console
-$ sed -n '1,80p' /Users/johncurtis/projects/firstmate/state/orca-liveness-p1.meta
-window=fm-orca-liveness-p1
-worktree=/Users/johncurtis/orca/workspaces/firstmate/fm-orca-liveness-p1
+```text
+window=fm-orca-e1-runtime-scout-e1
+worktree=/Users/johncurtis/orca/workspaces/firstmate/fm-orca-e1-runtime-scout-e1
 project=/Users/johncurtis/projects/firstmate
-harness=codex
-kind=ship
+harness=claude
+kind=scout
 mode=no-mistakes
 yolo=off
-tasktmp=/tmp/fm-orca-liveness-p1
-model=gpt-5.6-sol
-effort=high
+tasktmp=/tmp/fm-orca-e1-runtime-scout-e1
+model=fable
+effort=medium
 backend=orca
-orca_worktree_id=69c04545-e3dd-467f-9b35-0eb698cc41a7::/Users/johncurtis/orca/workspaces/firstmate/fm-orca-liveness-p1
-terminal=term_ade970d2-9640-48a8-a388-9e2faf315e09
+orca_worktree_id=69c04545-e3dd-467f-9b35-0eb698cc41a7::/Users/johncurtis/orca/workspaces/firstmate/fm-orca-e1-runtime-scout-e1
+terminal=term_93a44266-2b0c-4f7a-9219-8628d0ae804b
 ```
 
-The exact-worktree query returned two live terminals and one working agent:
+While the scout was executing a Bash tool call, its exact-worktree query returned:
 
-```console
-$ orca worktree ps --json | jq '.result.worktrees[] | select(.worktreeId == "69c04545-e3dd-467f-9b35-0eb698cc41a7::/Users/johncurtis/orca/workspaces/firstmate/fm-orca-liveness-p1") | {worktreeId,path,liveTerminalCount,agents:[.agents[] | {paneKey,state,agentType}]}'
+```json
 {
-  "worktreeId": "69c04545-e3dd-467f-9b35-0eb698cc41a7::/Users/johncurtis/orca/workspaces/firstmate/fm-orca-liveness-p1",
-  "path": "/Users/johncurtis/orca/workspaces/firstmate/fm-orca-liveness-p1",
+  "worktreeId": "69c04545-e3dd-467f-9b35-0eb698cc41a7::/Users/johncurtis/orca/workspaces/firstmate/fm-orca-e1-runtime-scout-e1",
+  "path": "/Users/johncurtis/orca/workspaces/firstmate/fm-orca-e1-runtime-scout-e1",
   "liveTerminalCount": 2,
   "agents": [
     {
-      "paneKey": "4a22f407-e3f1-4832-9804-c9f1e1297c40:ebba6a51-a1ca-416e-be6e-de994d44b904",
+      "paneKey": "a0c06606-27a5-4681-9872-1fd970006abd:4b750970-b01f-4207-82e4-b829ef033881",
       "state": "working",
-      "agentType": "codex"
+      "agentType": "claude"
     }
   ]
 }
 ```
 
-This diagnostic proves only exact worktree lookup and one observed `working` value.
-It does not prove a `terminal=term_...` to `agents[].paneKey` relation, an `idle` transition, waiting/permission behavior, clean exit, or a safe no-agent/plain-shell result.
-Fixture tests cover conservative fallback behavior, but fixtures are not E1 evidence.
+After the scout wrote its report and its status log recorded `done: report at data/orca-e1-runtime-scout-e1/report.md`, the same agent entry was observed with `state: "done"`.
+The scout's full seven-worktree JSON contained no structural `term_*` value and no value related to `93a44266` outside the scout's echoed `toolInput` free text.
+The exact recorded `terminal=term_93a44266-2b0c-4f7a-9219-8628d0ae804b` therefore had no proven relation to `agents[0].paneKey`.
+The worktree also had two live terminals but only one agent entry, so selecting the sole returned agent would be an unverified cross-pane guess.
+
+The controlling Firstmate then used guarded scout teardown.
+Cleanup was verified read-only: `state/orca-e1-runtime-scout-e1.meta` was absent, and this exact-path query returned an empty array:
+
+```console
+$ orca worktree ps --json | jq '[.result.worktrees[] | select((.path // "") | contains("orca-e1-runtime-scout-e1")) | {worktreeId,path,status,liveTerminalCount,agents:[.agents[] | {paneKey,state,agentType}]}]'
+[]
+```
 
 #### E1 decision: refuse
 
-E1 is refused for this round and P1 remains blocked.
-The required disposable Firstmate-created Orca scout was not run because this delegated brief explicitly prohibited the necessary `bin/fm-spawn.sh`, `bin/fm-teardown.sh`, and fleet operations.
-The available ship-task diagnostic also met the rider's ambiguity refusal rule independently: `agents[]` identified an agent by `paneKey`, Firstmate identified its endpoint by `terminal=term_...`, no relation between those identities was present, and the worktree contained two live terminals.
-Choosing the sole returned agent would be a cross-pane guess prohibited by the rider.
+E1 proves exact worktree matching plus directly observed `working` and `done` agent values.
+It does not prove a stable terminal-to-agent identity relation, `idle`, waiting/permission, or a safe absent-agent/plain-shell mapping.
+Those missing observations and the two-terminal ambiguity meet the rider's refusal rule.
 
-Production behavior therefore remains unchanged: Orca busy state and agent liveness both report `unknown`, and existing terminal-tail fallback policy remains in place.
-No Orca worktree cleanup command was run because no E1 scout was created.
-The next eligible work is E1 again under explicit authority to create and guard-teardown a disposable scout, with exact working, idle, clean-exit, and plain-shell/no-agent captures plus a proven terminal-to-agent identity relation.
+P1 is therefore blocked and production remains unchanged: Orca busy state and agent liveness both report `unknown`, and existing terminal-tail fallback policy remains in place.
+Fixture tests pin the conservative fallback, but fixtures are not E1 evidence.
+The next eligible work is E1 again with a proven endpoint-to-agent relation and direct idle plus no-agent/plain-shell observations.
 E2/P2 durable endpoint re-resolution is not unlocked.
-
 Real-Orca smoke verification was run against `/usr/local/bin/orca` with `/Applications/Orca.app` reporting bundle version `1.4.116`; `orca status --json` reported `result.runtime.reachable=true` and `result.runtime.state="ready"`.
 The verified terminal creation handle field is `result.terminal.handle` from `orca terminal create --json`; worktree creation returned `result.worktree.id` and `result.worktree.path` in the same smoke run.
 Firstmate intentionally ignores speculative terminal-handle shapes such as bare `result.id` and nested `result.worktree.terminal` until a real Orca smoke run proves them.
