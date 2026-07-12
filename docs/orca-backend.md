@@ -101,6 +101,84 @@ Teardown:
 
 ## Verification
 
+### Semantic liveness E1 observation - not an accepted experiment (2026-07-12)
+
+At `2026-07-12 13:29:08 CDT`, the delegated implementation task inspected the running Orca environment read-only.
+This was not E1: the observed Firstmate task was `kind=ship`, not the rider-required disposable `kind=scout`, and the delegated brief prohibited `bin/fm-spawn.sh`, `bin/fm-teardown.sh`, and all Firstmate fleet operations.
+No scratch task was created or cleaned up.
+The observation below therefore cannot unlock P1.
+
+The installed application version was read without modifying Orca:
+
+```console
+$ /usr/bin/defaults read /Applications/Orca.app/Contents/Info CFBundleShortVersionString
+1.4.137
+```
+
+The runtime was ready:
+
+```console
+$ orca status --json | jq '{ok,result:{app:.result.app,runtime:.result.runtime},_meta}'
+{
+  "ok": true,
+  "result": {
+    "app": {
+      "running": true,
+      "pid": 12642
+    },
+    "runtime": {
+      "state": "ready",
+      "reachable": true,
+      "runtimeId": "923315fe-d6cc-4bc1-9c1f-de30cd45c894"
+    }
+  },
+  "_meta": {
+    "runtimeId": "923315fe-d6cc-4bc1-9c1f-de30cd45c894"
+  }
+}
+```
+
+The observed ship task's recorded metadata was:
+
+```console
+$ sed -n '1,80p' /Users/johncurtis/projects/firstmate/state/orca-liveness-p1.meta
+window=fm-orca-liveness-p1
+worktree=/Users/johncurtis/orca/workspaces/firstmate/fm-orca-liveness-p1
+project=/Users/johncurtis/projects/firstmate
+harness=codex
+kind=ship
+mode=no-mistakes
+yolo=off
+tasktmp=/tmp/fm-orca-liveness-p1
+model=gpt-5.6-sol
+effort=high
+backend=orca
+orca_worktree_id=69c04545-e3dd-467f-9b35-0eb698cc41a7::/Users/johncurtis/orca/workspaces/firstmate/fm-orca-liveness-p1
+terminal=term_ade970d2-9640-48a8-a388-9e2faf315e09
+```
+
+The exact-worktree query returned two live terminals and one working agent:
+
+```console
+$ orca worktree ps --json | jq '.result.worktrees[] | select(.worktreeId == "69c04545-e3dd-467f-9b35-0eb698cc41a7::/Users/johncurtis/orca/workspaces/firstmate/fm-orca-liveness-p1") | {worktreeId,path,liveTerminalCount,agents:[.agents[] | {paneKey,state,agentType}]}'
+{
+  "worktreeId": "69c04545-e3dd-467f-9b35-0eb698cc41a7::/Users/johncurtis/orca/workspaces/firstmate/fm-orca-liveness-p1",
+  "path": "/Users/johncurtis/orca/workspaces/firstmate/fm-orca-liveness-p1",
+  "liveTerminalCount": 2,
+  "agents": [
+    {
+      "paneKey": "4a22f407-e3f1-4832-9804-c9f1e1297c40:ebba6a51-a1ca-416e-be6e-de994d44b904",
+      "state": "working",
+      "agentType": "codex"
+    }
+  ]
+}
+```
+
+This diagnostic proves only exact worktree lookup and one observed `working` value.
+It does not prove a `terminal=term_...` to `agents[].paneKey` relation, an `idle` transition, waiting/permission behavior, clean exit, or a safe no-agent/plain-shell result.
+Fixture tests cover conservative fallback behavior, but fixtures are not E1 evidence.
+
 Real-Orca smoke verification was run against `/usr/local/bin/orca` with `/Applications/Orca.app` reporting bundle version `1.4.116`; `orca status --json` reported `result.runtime.reachable=true` and `result.runtime.state="ready"`.
 The verified terminal creation handle field is `result.terminal.handle` from `orca terminal create --json`; worktree creation returned `result.worktree.id` and `result.worktree.path` in the same smoke run.
 Firstmate intentionally ignores speculative terminal-handle shapes such as bare `result.id` and nested `result.worktree.terminal` until a real Orca smoke run proves them.
