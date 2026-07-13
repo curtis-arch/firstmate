@@ -1,0 +1,236 @@
+version: 2
+
+goal:
+  title: "Orca-native Firstmate integration audit"
+  slug: "orca-firstmate-native-integration-audit"
+  kind: audit
+  tranche: "Produce a source-backed comparative architecture and prioritized integration recommendations without implementation changes."
+  status: complete
+  oracle:
+    signal: "A final Judge audit accepts a source-cited capability/ownership matrix, lifecycle traces, gap analysis, and prioritized update proposal covering shared-worktree and isolated-worktree operation."
+    cadence: "after each research task and at final audit"
+    final_proof: "Every material claim maps to current Orca docs/code or Firstmate docs/code, contradictions are resolved, and recommendations include exact ownership boundaries and candidate Firstmate files."
+  intake:
+    original_request: "Deeply understand how Orca and Firstmate see agents, worktrees, subagents, panes, and their CLIs; compare them and identify where Firstmate should use Orca more natively and where Firstmate is better."
+    interpreted_outcome: "A trustworthy integration architecture showing how Firstmate should coordinate agents natively inside Orca without losing Firstmate's supervision, safety, backlog, and delivery guarantees."
+    input_shape: audit
+    audience: "Captain and future Firstmate maintainers"
+    authority: requested
+    proof_type: source_backed_answer
+    completion_proof: "A final report with evidence-backed current-state models, end-to-end lifecycle comparisons, compatibility gaps, explicit authority boundaries, and an implementation-ready prioritized roadmap."
+    likely_misfire: "Producing generic tool comparisons, assuming docs equal runtime behavior, or recommending that one system replace the other instead of identifying the correct authority for each lifecycle responsibility."
+    blind_spots_considered:
+      - "Shared-worktree orchestration versus isolated worktree ownership"
+      - "Visibility of team panes and terminals in Orca"
+      - "Firstmate watcher, lock, backlog, landing, and teardown guarantees"
+      - "Orca runtime IDs, terminal handles, worktree lineage, orchestration messages, and session restore"
+      - "Direct reports versus Orca child agents and coordinator semantics"
+      - "Docs lag versus current source behavior"
+      - "Migration compatibility for tmux, Treehouse, and non-Orca backends"
+    existing_plan_facts:
+      - "Start with Orca docs at /Users/johncurtis/projects/ai-artifacts/ocra-docs/."
+      - "Use /Users/johncurtis/projects/orca only when docs are incomplete or conflict with observed behavior."
+      - "Inspect Firstmate docs and source at /Users/johncurtis/projects/firstmate."
+      - "Shared-worktree teams should be evaluated for Orca CLI pane/terminal visibility."
+      - "Isolated worktree flows should compare Firstmate's current backend machinery with Orca-native worktree and orchestration facilities."
+
+rules:
+  pm_owns_state: true
+  one_active_task: true
+  max_write_workers: 1
+  no_implementation_without_worker_or_pm_task: true
+  no_completion_without_judge_or_pm_audit: true
+  planning_is_not_completion: true
+  queued_required_worker_blocks_completion: true
+  continuous_until_full_outcome: false
+  missing_input_or_credentials_do_not_stop_goal: true
+  preserve_and_validate_existing_plan: true
+  intake_misfire_must_be_audited: true
+  goal_pressure_requires_oracle: true
+  no_completion_on_weak_proof: true
+  slice_policy:
+    max_consecutive_tiny_tasks: 2
+    prefer_vertical_slices: true
+    judge_picks_largest_safe_slice: true
+    worker_completes_whole_slice: true
+
+agents:
+  scout: installed
+  worker: installed
+  judge: installed
+
+visual_board:
+  selected: local
+  local:
+    status: blocked
+    url: null
+    command: "npx diligence board docs/goals/orca-firstmate-native-integration-audit"
+    blocker: "Installed Diligence plugin has no runnable npm executable; npx diligence returned 'could not determine executable to run'."
+
+active_task: null
+
+tasks:
+  - id: T001
+    type: scout
+    assignee: Scout
+    status: done
+    reasoning_hint: high
+    objective: "Build Orca's current world model from documentation first, then resolve material gaps or contradictions against current Orca source and safe CLI evidence."
+    inputs:
+      - "/Users/johncurtis/projects/ai-artifacts/ocra-docs/"
+      - "/Users/johncurtis/projects/orca"
+      - "Current orca CLI --help and read-only JSON commands when needed"
+    constraints:
+      - "Read-only."
+      - "Start with docs; inspect source only for missing, ambiguous, or stale behavior."
+      - "Cover repos/projects, worktrees, folder workspaces, terminals/panes/tabs, agents/sessions, orchestration, lineage, restore, lifecycle, and cleanup."
+      - "Cite exact docs/source paths for every material claim."
+    expected_output:
+      - "Orca conceptual model and ownership boundaries"
+      - "End-to-end shared-worktree and isolated-worktree lifecycle traces"
+      - "CLI capability/guarantee map"
+      - "Docs-versus-source discrepancies"
+      - "Receipt note at notes/T001-orca-world-model.md"
+    receipt: "2026-07-12: source-backed Orca model and lifecycle traces recorded in notes/T001-orca-world-model.md; full evidence: data/orca-world-model-a1/report.md. Key constraints: terminal handles are ephemeral, orchestration is runtime-global, and Orca deletion can remove branches by default."
+
+  - id: T002
+    type: scout
+    assignee: Scout
+    status: done
+    reasoning_hint: high
+    objective: "Build Firstmate's current world model from AGENTS.md, docs, skills, backend adapters, and lifecycle scripts, with special attention to Orca integration."
+    inputs:
+      - "/Users/johncurtis/projects/firstmate/AGENTS.md"
+      - "/Users/johncurtis/projects/firstmate/docs/"
+      - "/Users/johncurtis/projects/firstmate/bin/"
+      - "/Users/johncurtis/projects/firstmate/.agents/skills/"
+    constraints:
+      - "Read-only."
+      - "Trace intake, dispatch, spawn, brief, backend metadata, communication, supervision, recovery, landing, teardown, and secondmates."
+      - "Distinguish generic lifecycle contracts from tmux, Treehouse, and Orca adapter behavior."
+      - "Cite exact docs/source paths for every material claim."
+    expected_output:
+      - "Firstmate conceptual model and ownership boundaries"
+      - "Current shared-worktree and isolated-worktree lifecycle traces"
+      - "Orca backend capability and limitation map"
+      - "State/authority duplication inventory"
+      - "Receipt note at notes/T002-firstmate-world-model.md"
+    receipt: "2026-07-12: source-backed Firstmate model and Orca-backend limitations recorded in notes/T002-firstmate-world-model.md; full evidence: data/firstmate-world-model-b1/report.md. Firstmate is the safety/delivery control plane; current Orca integration is one isolated worktree + one terminal per task."
+
+  - id: T003
+    type: scout
+    assignee: Scout
+    status: done
+    reasoning_hint: high
+    objective: "Compare shared-worktree team operation: Orca orchestration, visible panes, terminal lineage, coordinator/worker messaging, and Firstmate direct-report supervision."
+    inputs:
+      - "T001 receipt and note"
+      - "T002 receipt and note"
+    constraints:
+      - "Read-only."
+      - "Explain which system should own pane creation, agent launch, task identity, prompt delivery, messaging, liveness, and completion receipts."
+      - "Identify failure modes caused by bypassing Orca CLI inside a shared worktree."
+    expected_output:
+      - "Shared-worktree sequence diagram"
+      - "Authority/RACI matrix"
+      - "Visibility and recovery gaps"
+      - "Candidate Firstmate integration seams"
+      - "Receipt note at notes/T003-shared-worktree-comparison.md"
+    receipt: "2026-07-12: shared-worktree authority matrix and failure analysis recorded in notes/T003-shared-worktree-comparison.md; full evidence: data/shared-worktree-comparison-c1/report.md. Team worktrees need a new explicit Firstmate task kind, not a flag on the current isolated task."
+
+  - id: T004
+    type: scout
+    assignee: Scout
+    status: done
+    reasoning_hint: high
+    objective: "Compare isolated-worktree operation: Firstmate Treehouse/backend flows versus Orca-native worktree creation, terminal lifecycle, lineage, coordination, restoration, and deletion."
+    inputs:
+      - "T001 receipt and note"
+      - "T002 receipt and note"
+    constraints:
+      - "Read-only."
+      - "Map every lifecycle phase and state owner."
+      - "Separate real Orca limitations from Firstmate adapter limitations."
+      - "Preserve portability requirements for non-Orca environments."
+    expected_output:
+      - "Isolated-worktree sequence diagram"
+      - "Capability and guarantee comparison"
+      - "Duplicate-state and stale-runtime failure modes"
+      - "Candidate backend/interface changes"
+      - "Receipt note at notes/T004-isolated-worktree-comparison.md"
+    receipt: "2026-07-12: isolated-worktree lifecycle and ownership comparison recorded in notes/T004-isolated-worktree-comparison.md; full evidence: data/isolated-worktree-comparison-d1/report.md. Evolve the Orca adapter incrementally; retain Firstmate as safety and delivery authority."
+
+  - id: T005
+    type: judge
+    assignee: Judge
+    status: done
+    reasoning_hint: high
+    objective: "Judge the combined evidence and select the correct Orca/Firstmate authority model plus a prioritized, migration-safe integration roadmap."
+    inputs:
+      - "T001-T004 receipts and notes"
+    constraints:
+      - "Do not implement."
+      - "Reject generic recommendations or claims without source evidence."
+      - "Preserve Firstmate safety guarantees and non-Orca backends unless an explicit tradeoff is justified."
+    expected_output:
+      - "Accepted authority model"
+      - "Where Orca is authoritative"
+      - "Where Firstmate is authoritative"
+      - "Where adapter translation is required"
+      - "Ranked gaps by impact, confidence, and implementation risk"
+      - "Candidate Firstmate files and verification strategy"
+      - "Deferred questions requiring runtime experiments"
+      - "Receipt note at notes/T005-architecture-decision.md"
+    receipt: "2026-07-12: adversarial architecture judgment accepted in notes/T005-architecture-decision.md; full evidence: data/orca-firstmate-architecture-judge-e1/report.md. Orca owns runtime/collaboration facts for Orca tasks; Firstmate retains safety, landing, and destructive authority."
+
+  - id: T006
+    type: pm
+    assignee: PM
+    status: done
+    reasoning_hint: high
+    objective: "Compose the final source-backed comparative report and implementation-ready roadmap from accepted evidence and Judge decisions."
+    inputs:
+      - "T001-T005 receipts and notes"
+    constraints:
+      - "Write only within this goal directory."
+      - "Do not edit Firstmate or Orca implementation files."
+      - "Clearly label facts, inferences, recommendations, and unresolved experiments."
+    expected_output:
+      - "notes/T006-final-report.md"
+      - "Executive summary"
+      - "World-model comparison"
+      - "Shared and isolated lifecycle diagrams"
+      - "Authority matrix"
+      - "Prioritized roadmap with candidate files and acceptance checks"
+    receipt: "2026-07-12: final comparative report written at notes/T006-final-report.md. It contains source-backed models, shared/isolated traces, authority matrix, gated roadmap, experiments, and fork posture."
+
+  - id: T999
+    type: judge
+    assignee: Judge
+    status: done
+    reasoning_hint: high
+    objective: "Audit whether the final report fully answers the captain's Orca-native Firstmate integration challenge."
+    inputs:
+      - "All task receipts and notes"
+      - "notes/T006-final-report.md"
+      - "Goal oracle"
+    constraints:
+      - "Do not implement."
+      - "Reject completion if either shared-worktree or isolated-worktree behavior is underspecified."
+      - "Reject completion if material claims lack source paths or if recommendations omit ownership and verification."
+    expected_output:
+      - "complete | not_complete"
+      - "full_outcome_complete: true | false"
+      - "Evidence coverage"
+      - "Missing analysis"
+      - "Next task if not complete"
+    receipt: "2026-07-12: final audit accepted completion at data/orca-firstmate-final-audit-f1/report.md. Verdict: complete; full_outcome_complete: true."
+
+checks:
+  dirty_fingerprint: unknown
+  last_verification:
+    result: pass
+    task: T999
+    commands:
+      - "Final Judge read goal, board, final report, and all five evidence reports."
+      - "Final Judge verdict: complete; full_outcome_complete: true."
