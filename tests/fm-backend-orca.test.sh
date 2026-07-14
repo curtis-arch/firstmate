@@ -763,15 +763,21 @@ test_peek_and_crew_state_fail_closed_on_orca_error_json() {
 }
 
 test_target_exists_rejects_orca_error_json() {
-  local status
+  local status state meta
   orca_case target-exists-error-json
+  state="$CASE_DIR/state"
+  mkdir -p "$state"
+  meta="$state/task.meta"
+  printf 'window=fm-task\nbackend=orca\nterminal=term-stale\norca_worktree_id=repo::/scratch\norca_pane_key=11111111-1111-4111-8111-111111111111:22222222-2222-4222-8222-222222222222\n' > "$meta"
   printf '{"ok":false,"error":{"code":"terminal_handle_stale","message":"terminal handle stale"}}\n' > "$RESP/1.out"
   set +e
-  PATH="$FB:$PATH" FM_ORCA_LOG="$LOG" FM_ORCA_RESPONSES="$RESP" \
+  PATH="$FB:$PATH" FM_ORCA_LOG="$LOG" FM_ORCA_RESPONSES="$RESP" FM_STATE_OVERRIDE="$state" \
     bash -c '. "$0/bin/fm-backend.sh"; fm_backend_target_exists orca term-stale fm-task' "$ROOT"
   status=$?
   set -e
   [ "$status" -ne 0 ] || fail "fm_backend_target_exists should reject Orca ok:false read JSON"
+  assert_not_contains "$(cat "$LOG")" $'orca\x1f''terminal'$'\x1f''list' "fm_backend_target_exists must not recover a stale handle"
+  assert_grep 'terminal=term-stale' "$meta" "fm_backend_target_exists changed terminal metadata"
   pass "fm_backend_target_exists: Orca ok:false read JSON is not live"
 }
 
@@ -1432,16 +1438,54 @@ orca_stale_handle_recovery_rejects_disconnected_and_unresolved_candidates() {
   orca_recovery_meta "$state" recoverunresolved term-old \
     11111111-1111-4111-8111-111111111111:22222222-2222-4222-8222-222222222222
   printf '{"ok":false,"error":{"code":"terminal_handle_stale"}}\n' > "$RESP/1.out"
-  printf '{"ok":true,"result":{"terminals":[{"handle":"term-other"},{"handle":"term-unreadable"}]}}\n' > "$RESP/2.out"
-  printf '{"ok":true,"result":{"terminal":{"worktreeId":"repo::/scratch","tabId":"33333333-3333-4333-8333-333333333333","leafId":"44444444-4444-4444-8444-444444444444","connected":true,"writable":true}}}\n' > "$RESP/3.out"
-  printf '{"ok":false,"error":{"code":"runtime_unavailable"}}\n' > "$RESP/4.out"
+  printf '{"ok":true,"result":{"terminals":[{"handle":"term-unreadable"},{"handle":"term-other"}]}}\n' > "$RESP/2.out"
+  printf '{"ok":false,"error":{"code":"runtime_unavailable"}}\n' > "$RESP/3.out"
+  printf '{"ok":true,"result":{"terminal":{"worktreeId":"repo::/scratch","tabId":"33333333-3333-4333-8333-333333333333","leafId":"44444444-4444-4444-8444-444444444444","connected":true,"writable":true}}}\n' > "$RESP/4.out"
   out=$( PATH="$FB:$PATH" FM_ORCA_LOG="$LOG" FM_ORCA_RESPONSES="$RESP" FM_STATE_OVERRIDE="$state" \
     bash -c '. "$0/bin/fm-backend.sh"; fm_backend_capture orca term-old 5' "$ROOT" 2>&1 )
   status=$?
   [ "$status" -ne 0 ] || fail "one unreadable candidate must fail the entire recovery"
   assert_contains "$out" "recovery unresolved" "unreadable candidate did not report unresolved"
+  assert_contains "$(cat "$LOG")" $'orca\x1f''terminal'$'\x1f''show'$'\x1f''--terminal'$'\x1f''term-other' \
+    "recovery stopped enumerating after an unreadable candidate"
   assert_grep 'terminal=term-old' "$meta" "unresolved recovery changed metadata"
   pass "orca_stale_handle_recovery_rejects_disconnected_and_unresolved_candidates"
+}
+
+orca_terminal_metadata_update_uses_shared_lock() {
+  local state meta holder setter pr_writer
+  orca_case recovery-meta-lock
+  state="$CASE_DIR/state"
+  meta="$state/recoverlock.meta"
+  orca_recovery_meta "$state" recoverlock term-old \
+    11111111-1111-4111-8111-111111111111:22222222-2222-4222-8222-222222222222
+  PATH="$FB:$PATH" FM_STATE_OVERRIDE="$state" bash -c '
+    . "$0/bin/fm-wake-lib.sh"
+    fm_lock_acquire_wait "$1.lock"
+    : > "$2"
+    while [ ! -f "$3" ]; do sleep 0.01; done
+    fm_lock_release "$1.lock"
+  ' "$ROOT" "$meta" "$CASE_DIR/locked" "$CASE_DIR/release" &
+  holder=$!
+  while [ ! -f "$CASE_DIR/locked" ]; do sleep 0.01; done
+  PATH="$FB:$PATH" FM_STATE_OVERRIDE="$state" bash -c '
+    . "$0/bin/backends/orca.sh"
+    fm_backend_orca_meta_set_terminal "$1" term-new
+  ' "$ROOT" "$meta" &
+  setter=$!
+  FM_ROOT_OVERRIDE="$ROOT" FM_STATE_OVERRIDE="$state" \
+    "$ROOT/bin/fm-pr-check.sh" recoverlock https://github.com/example/repo/pull/1 >/dev/null &
+  pr_writer=$!
+  sleep 0.05
+  kill -0 "$setter" 2>/dev/null || fail "terminal metadata update did not wait for the shared lock"
+  kill -0 "$pr_writer" 2>/dev/null || fail "PR metadata append did not wait for the shared lock"
+  : > "$CASE_DIR/release"
+  wait "$holder" || fail "metadata lock holder failed"
+  wait "$setter" || fail "terminal metadata update failed after lock release"
+  wait "$pr_writer" || fail "PR metadata append failed after lock release"
+  assert_grep 'terminal=term-new' "$meta" "locked metadata update did not replace the terminal"
+  assert_grep 'pr=https://github.com/example/repo/pull/1' "$meta" "locked metadata update lost an unrelated append"
+  pass "orca_terminal_metadata_update_uses_shared_lock"
 }
 
 orca_recovery_triggers_only_for_stale_and_requires_new_metadata() {
@@ -1480,6 +1524,7 @@ orca_pane_key_validation_is_strict() {
   bash -c '
     . "$0/bin/backends/orca.sh"
     fm_backend_orca_pane_key_valid "11111111-1111-4111-8111-111111111111:22222222-2222-4222-8222-222222222222"
+    ! fm_backend_orca_pane_key_valid "not-a-uuid:22222222-2222-4222-8222-222222222222"
     ! fm_backend_orca_pane_key_valid "a:b:c"
     ! fm_backend_orca_pane_key_valid ":22222222-2222-4222-8222-222222222222"
     ! fm_backend_orca_pane_key_valid "tab:not-a-uuid"
@@ -1560,7 +1605,7 @@ orca_snapshot_rejects_cross_worktree_placeholder_and_duplicates() {
 }
 
 orca_snapshot_rejects_errors_malformed_json_and_unknown_states() {
-  local show_error malformed_show ps_error malformed_ps unknown_state disconnected
+  local show_error malformed_show ps_error malformed_ps unknown_state disconnected null_agent empty_agent unrelated_agent
   orca_case liveness-invalid-results
   printf '{"ok":false,"error":{"code":"terminal_handle_stale"}}\n' > "$RESP/1.out"
   printf '{not-json\n' > "$RESP/2.out"
@@ -1571,13 +1616,22 @@ orca_snapshot_rejects_errors_malformed_json_and_unknown_states() {
   printf '{"ok":true,"result":{"terminal":{"worktreeId":"repo::/scratch","tabId":"11111111-1111-4111-8111-111111111111","leafId":"22222222-2222-4222-8222-222222222222","connected":true,"writable":true}}}\n' > "$RESP/7.out"
   printf '{"ok":true,"result":{"worktrees":[{"worktreeId":"repo::/scratch","agents":[{"paneKey":"11111111-1111-4111-8111-111111111111:22222222-2222-4222-8222-222222222222","state":"waiting"}]}]}}\n' > "$RESP/8.out"
   printf '{"ok":true,"result":{"terminal":{"worktreeId":"repo::/scratch","tabId":"11111111-1111-4111-8111-111111111111","leafId":"22222222-2222-4222-8222-222222222222","connected":false,"writable":true}}}\n' > "$RESP/9.out"
+  printf '{"ok":true,"result":{"terminal":{"worktreeId":"repo::/scratch","tabId":"11111111-1111-4111-8111-111111111111","leafId":"22222222-2222-4222-8222-222222222222","connected":true,"writable":true}}}\n' > "$RESP/10.out"
+  printf '{"ok":true,"result":{"worktrees":[{"worktreeId":"repo::/scratch","agents":[null]}]}}\n' > "$RESP/11.out"
+  printf '{"ok":true,"result":{"terminal":{"worktreeId":"repo::/scratch","tabId":"11111111-1111-4111-8111-111111111111","leafId":"22222222-2222-4222-8222-222222222222","connected":true,"writable":true}}}\n' > "$RESP/12.out"
+  printf '{"ok":true,"result":{"worktrees":[{"worktreeId":"repo::/scratch","agents":[{}]}]}}\n' > "$RESP/13.out"
+  printf '{"ok":true,"result":{"terminal":{"worktreeId":"repo::/scratch","tabId":"11111111-1111-4111-8111-111111111111","leafId":"22222222-2222-4222-8222-222222222222","connected":true,"writable":true}}}\n' > "$RESP/14.out"
+  printf '{"ok":true,"result":{"worktrees":[{"worktreeId":"repo::/scratch","agents":[{"paneKey":"33333333-3333-4333-8333-333333333333:44444444-4444-4444-8444-444444444444","state":"working"}]}]}}\n' > "$RESP/15.out"
   show_error=$( PATH="$FB:$PATH" FM_ORCA_LOG="$LOG" FM_ORCA_RESPONSES="$RESP" bash -c '. "$0/bin/fm-backend.sh"; fm_backend_agent_alive orca term repo::/scratch' "$ROOT" )
   malformed_show=$( PATH="$FB:$PATH" FM_ORCA_LOG="$LOG" FM_ORCA_RESPONSES="$RESP" bash -c '. "$0/bin/fm-backend.sh"; fm_backend_agent_alive orca term repo::/scratch' "$ROOT" )
   ps_error=$( PATH="$FB:$PATH" FM_ORCA_LOG="$LOG" FM_ORCA_RESPONSES="$RESP" bash -c '. "$0/bin/fm-backend.sh"; fm_backend_agent_alive orca term repo::/scratch' "$ROOT" )
   malformed_ps=$( PATH="$FB:$PATH" FM_ORCA_LOG="$LOG" FM_ORCA_RESPONSES="$RESP" bash -c '. "$0/bin/fm-backend.sh"; fm_backend_agent_alive orca term repo::/scratch' "$ROOT" )
   unknown_state=$( PATH="$FB:$PATH" FM_ORCA_LOG="$LOG" FM_ORCA_RESPONSES="$RESP" bash -c '. "$0/bin/fm-backend.sh"; fm_backend_agent_alive orca term repo::/scratch' "$ROOT" )
   disconnected=$( PATH="$FB:$PATH" FM_ORCA_LOG="$LOG" FM_ORCA_RESPONSES="$RESP" bash -c '. "$0/bin/fm-backend.sh"; fm_backend_agent_alive orca term repo::/scratch' "$ROOT" )
-  [ "$show_error/$malformed_show/$ps_error/$malformed_ps/$unknown_state/$disconnected" = unknown/unknown/unknown/unknown/unknown/unknown ] \
+  null_agent=$( PATH="$FB:$PATH" FM_ORCA_LOG="$LOG" FM_ORCA_RESPONSES="$RESP" bash -c '. "$0/bin/fm-backend.sh"; fm_backend_agent_alive orca term repo::/scratch' "$ROOT" )
+  empty_agent=$( PATH="$FB:$PATH" FM_ORCA_LOG="$LOG" FM_ORCA_RESPONSES="$RESP" bash -c '. "$0/bin/fm-backend.sh"; fm_backend_agent_alive orca term repo::/scratch' "$ROOT" )
+  unrelated_agent=$( PATH="$FB:$PATH" FM_ORCA_LOG="$LOG" FM_ORCA_RESPONSES="$RESP" bash -c '. "$0/bin/fm-backend.sh"; fm_backend_agent_alive orca term repo::/scratch' "$ROOT" )
+  [ "$show_error/$malformed_show/$ps_error/$malformed_ps/$unknown_state/$disconnected/$null_agent/$empty_agent/$unrelated_agent" = unknown/unknown/unknown/unknown/unknown/unknown/unknown/unknown/unknown ] \
     || fail "all error, malformed, unknown-state, and disconnected shapes must remain unknown"
   pass "orca_snapshot_rejects_errors_malformed_json_and_unknown_states"
 }
@@ -1627,6 +1681,7 @@ test_spawn_rejects_placeholder_pane_key_without_failing
 orca_stale_handle_recovery_adopts_one_connected_match
 orca_stale_handle_recovery_rejects_zero_and_duplicate_matches
 orca_stale_handle_recovery_rejects_disconnected_and_unresolved_candidates
+orca_terminal_metadata_update_uses_shared_lock
 orca_recovery_triggers_only_for_stale_and_requires_new_metadata
 orca_pane_key_validation_is_strict
 orca_snapshot_selects_only_recorded_worktree_and_matching_agent

@@ -10,6 +10,7 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 FM_ROOT="${FM_ROOT_OVERRIDE:-$(cd "$SCRIPT_DIR/.." && pwd)}"
 FM_HOME="${FM_HOME:-${FM_ROOT_OVERRIDE:-$FM_ROOT}}"
 STATE="${FM_STATE_OVERRIDE:-$FM_HOME/state}"
+. "$FM_ROOT/bin/fm-wake-lib.sh"
 "$FM_ROOT/bin/fm-guard.sh" || true
 ID=$1
 URL=$2
@@ -25,12 +26,16 @@ if [ -f "$META" ]; then
       fi
     fi
   fi
+  META_STATUS=0
+  fm_lock_acquire_wait "$META.lock"
   if ! grep -qxF "pr=$URL" "$META"; then
-    echo "pr=$URL" >> "$META"
+    echo "pr=$URL" >> "$META" || META_STATUS=$?
   fi
-  if [ -n "$PR_HEAD" ] && ! grep -qxF "pr_head=$PR_HEAD" "$META"; then
-    echo "pr_head=$PR_HEAD" >> "$META"
+  if [ "$META_STATUS" -eq 0 ] && [ -n "$PR_HEAD" ] && ! grep -qxF "pr_head=$PR_HEAD" "$META"; then
+    echo "pr_head=$PR_HEAD" >> "$META" || META_STATUS=$?
   fi
+  fm_lock_release "$META.lock"
+  [ "$META_STATUS" -eq 0 ] || exit "$META_STATUS"
 fi
 
 cat > "$STATE/$ID.check.sh" <<EOF

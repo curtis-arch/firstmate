@@ -706,7 +706,7 @@ fm_backend_target_exists() {  # <backend> <target> [expected-label]
       ;;
     orca)
       fm_backend_source orca || return 1
-      fm_backend_orca_capture "$target" 1 "$(fm_backend_orca_meta_for_target "$target")" >/dev/null 2>&1
+      fm_backend_orca_capture "$target" 1 >/dev/null 2>&1
       ;;
     cmux)
       fm_backend_source cmux || return 1

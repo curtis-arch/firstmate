@@ -113,14 +113,11 @@ fm_backend_orca_run_json() {
   printf '%s' "$out" | fm_backend_orca_json_ok
 }
 
-# paneKey is Orca's canonical remint-stable identity: one non-empty tab id and
-# one UUID leaf id separated by exactly one colon.
+# paneKey is Orca's canonical remint-stable identity: one UUID tab id and one
+# UUID leaf id separated by exactly one colon.
 fm_backend_orca_pane_key_valid() {  # <pane-key>
-  local pane_key=${1:-} tab
-  [[ "$pane_key" =~ ^[^:]+:[0-9A-Fa-f]{8}-[0-9A-Fa-f]{4}-[0-9A-Fa-f]{4}-[0-9A-Fa-f]{4}-[0-9A-Fa-f]{12}$ ]] || return 1
-  tab=${pane_key%%:*}
-  case "$tab" in pty) return 1 ;; esac
-  return 0
+  local pane_key=${1:-} uuid='[0-9A-Fa-f]{8}-[0-9A-Fa-f]{4}-[0-9A-Fa-f]{4}-[0-9A-Fa-f]{4}-[0-9A-Fa-f]{12}'
+  [[ "$pane_key" =~ ^${uuid}:${uuid}$ ]]
 }
 
 # Normalize the terminal-show fields needed by both semantic liveness and
@@ -210,10 +207,16 @@ process.stdout.write(handles.join("\n"));
 }
 
 fm_backend_orca_meta_set_terminal() {  # <meta-path> <terminal-handle>
-  local meta=$1 terminal=$2 tmp
+  local meta=$1 terminal=$2 tmp status=0 lock
   [ -f "$meta" ] || return 1
+  # shellcheck source=bin/fm-wake-lib.sh
+  . "$(dirname -- "${BASH_SOURCE[0]}")/../fm-wake-lib.sh"
+  lock="$meta.lock"
+  fm_lock_acquire_wait "$lock"
+  [ -f "$meta" ] || status=1
   tmp="$meta.tmp.$$"
-  awk -v terminal="$terminal" '
+  if [ "$status" -eq 0 ]; then
+    awk -v terminal="$terminal" '
     BEGIN { written = 0 }
     /^terminal=/ {
       if (!written) print "terminal=" terminal
@@ -222,15 +225,22 @@ fm_backend_orca_meta_set_terminal() {  # <meta-path> <terminal-handle>
     }
     { print }
     END { if (!written) print "terminal=" terminal }
-  ' "$meta" > "$tmp" || { rm -f "$tmp"; return 1; }
-  mv "$tmp" "$meta"
+  ' "$meta" > "$tmp" || status=$?
+  fi
+  if [ "$status" -eq 0 ]; then
+    mv "$tmp" "$meta" || status=$?
+  else
+    rm -f "$tmp"
+  fi
+  fm_lock_release "$lock"
+  return "$status"
 }
 
 # Resolve the remint-stable pane identity inside exactly one recorded worktree.
 # Every candidate is shown before any decision; one unreadable candidate makes
 # the entire attempt unresolved because it could be the true match.
 fm_backend_orca_recover_terminal() {  # <meta-path>
-  local meta=${1:-} worktree_id pane_key list_out handles handle show_out record candidate_worktree rest candidate_pane connected
+  local meta=${1:-} worktree_id pane_key list_out handles handle show_out record candidate_worktree rest candidate_pane connected unresolved=0
   local -a matches=() connected_matches=()
   [ -f "$meta" ] || { echo "error: Orca endpoint recovery unavailable without task metadata" >&2; return 1; }
   worktree_id=$(grep '^orca_worktree_id=' "$meta" 2>/dev/null | tail -1 | cut -d= -f2- || true)
@@ -251,11 +261,13 @@ fm_backend_orca_recover_terminal() {  # <meta-path>
     [ -n "$handle" ] || continue
     show_out=$(orca terminal show --terminal "$handle" --json 2>/dev/null) || {
       echo "error: Orca endpoint recovery unresolved: candidate $handle could not be shown" >&2
-      return 1
+      unresolved=1
+      continue
     }
     record=$(fm_backend_orca_terminal_record "$show_out" 2>/dev/null) || {
       echo "error: Orca endpoint recovery unresolved: candidate $handle returned an invalid terminal shape" >&2
-      return 1
+      unresolved=1
+      continue
     }
     candidate_worktree=${record%%$'\t'*}
     rest=${record#*$'\t'}
@@ -264,13 +276,15 @@ fm_backend_orca_recover_terminal() {  # <meta-path>
     connected=${rest%%$'\t'*}
     fm_backend_orca_pane_key_valid "$candidate_pane" || {
       echo "error: Orca endpoint recovery unresolved: candidate $handle returned an invalid pane key" >&2
-      return 1
+      unresolved=1
+      continue
     }
     if [ "$candidate_worktree" = "$worktree_id" ] && [ "$candidate_pane" = "$pane_key" ]; then
       matches+=("$handle")
       connected_matches+=("$connected")
     fi
   done <<< "$handles"
+  [ "$unresolved" -eq 0 ] || return 1
   case "${#matches[@]}" in
     0)
       echo "error: Orca endpoint gone: no terminal matches pane $pane_key in recorded worktree $worktree_id" >&2
@@ -361,11 +375,12 @@ try {
 if (data.ok !== true || !data.result || !Array.isArray(data.result.worktrees)) process.exit(1);
 const worktrees = data.result.worktrees.filter((worktree) => worktree && worktree.worktreeId === worktreeId);
 if (worktrees.length !== 1 || !Array.isArray(worktrees[0].agents)) process.exit(1);
-const agents = worktrees[0].agents.filter((agent) => agent && agent.paneKey === paneKey);
-if (agents.length === 0) {
+if (!worktrees[0].agents.every((agent) => agent && typeof agent === "object" && typeof agent.paneKey === "string" && agent.paneKey.length > 0 && typeof agent.state === "string" && agent.state.length > 0)) process.exit(1);
+if (worktrees[0].agents.length === 0) {
   process.stdout.write("no-agent");
   process.exit(0);
 }
+const agents = worktrees[0].agents.filter((agent) => agent && agent.paneKey === paneKey);
 if (agents.length !== 1) process.exit(1);
 const state = agents[0].state;
 if (state !== "working" && state !== "done") process.exit(1);
