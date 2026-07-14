@@ -53,6 +53,7 @@ An Orca-spawned task records the normal task fields plus these Orca-specific fie
 
 ```text
 backend=orca
+generation=<immutable task generation>
 window=fm-<id>
 terminal=<orca terminal handle>
 orca_pane_key=<orca tab UUID>:<orca leaf UUID>
@@ -92,13 +93,14 @@ Stale-handle recovery:
 
 - Recovery runs only when a handle operation returns exact error code `terminal_handle_stale` and the task meta has both a recorded `orca_worktree_id` and a valid `orca_pane_key`.
 - Firstmate lists candidates with `orca terminal list --worktree id:<recorded-worktree> --json`, then resolves every candidate through `terminal show` because list results can contain non-joinable `pty:` placeholders.
-- Exactly one connected candidate whose `worktreeId` and `tabId:leafId` equal the recorded identities replaces `terminal=` atomically, and the original operation is retried once.
+- Exactly one connected candidate whose `worktreeId` and `tabId:leafId` equal the recorded identities replaces `terminal=` atomically only while the immutable task generation is unchanged, and the original operation is retried once.
 - Zero matches, duplicate matches, disconnected matches, unreadable candidates, malformed JSON, list failure, and every non-stale error leave metadata unchanged and fail closed.
 - Recovery never searches another worktree, guesses from titles or ordering, selects the first candidate, or creates a replacement terminal.
 - Existing task metas without `orca_pane_key` retain their prior behavior: live handles continue to work, while a stale handle surfaces the original Orca error without attempting recovery.
 
 Teardown:
 
+- Teardown claims the recorded task generation before any destructive cleanup; recovery and metadata promotion refuse while that ownership is active.
 - Scout teardown still requires `data/<id>/report.md` unless `--force` is explicitly used.
 - Ship teardown still refuses dirty or unlanded work before any terminal/worktree cleanup.
 - Ship teardown resolves `orca_worktree_id` back through Orca and verifies it matches the inspected `worktree=` path before removing anything; mismatches or uninspectable paths preserve metadata and fail closed.

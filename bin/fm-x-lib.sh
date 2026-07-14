@@ -720,7 +720,7 @@ fmx_meta_tmp() {
 fmx_meta_link_set() {
   local meta=$1 rid=$2 ts=$3 followups=${4:-0} platform=${5:-} reply_max=${6:-} tmp status=0
   fm_meta_lock_acquire "$meta" || return 1
-  [ -f "$meta" ] || status=1
+  [ -f "$meta" ] && fm_meta_is_active_unlocked "$meta" || status=1
   if [ "$status" -eq 0 ]; then
     tmp=$(fmx_meta_tmp "$meta") || status=$?
   fi
@@ -751,7 +751,7 @@ fmx_meta_link_set() {
 fmx_meta_followups_set() {
   local meta=$1 n=$2 tmp status=0
   fm_meta_lock_acquire "$meta" || return 1
-  [ -f "$meta" ] || status=1
+  [ -f "$meta" ] && fm_meta_is_active_unlocked "$meta" || status=1
   if [ "$status" -eq 0 ]; then
     tmp=$(fmx_meta_tmp "$meta") || status=$?
   fi
@@ -772,7 +772,11 @@ fmx_meta_link_clear() {
   [ -f "$meta" ] || return 0
   fm_meta_lock_acquire "$meta" || return 1
   if [ -f "$meta" ]; then
-    tmp=$(fmx_meta_tmp "$meta") || status=$?
+    if fm_meta_is_active_unlocked "$meta"; then
+      tmp=$(fmx_meta_tmp "$meta") || status=$?
+    else
+      status=1
+    fi
   fi
   if [ "$status" -eq 0 ] && [ -n "${tmp:-}" ] && ! { grep -vE '^x_request=|^x_request_ts=|^x_followups=|^x_platform=|^x_reply_max_chars=' "$meta" || true; } > "$tmp"; then status=1; fi
   [ "$status" -ne 0 ] || [ -z "${tmp:-}" ] || mv -f "$tmp" "$meta" || status=$?

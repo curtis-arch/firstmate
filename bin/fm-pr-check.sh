@@ -33,7 +33,7 @@ fi
 META_STATUS=0
 fm_meta_lock_acquire "$META" || exit 1
 CURRENT_IDENTITY=$(fm_meta_identity_unlocked "$META" 2>/dev/null || true)
-if [ -z "$CURRENT_IDENTITY" ] || [ "$CURRENT_IDENTITY" != "$EXPECTED_IDENTITY" ]; then
+if [ -z "$CURRENT_IDENTITY" ] || [ "$CURRENT_IDENTITY" != "$EXPECTED_IDENTITY" ] || ! fm_meta_is_active_unlocked "$META"; then
   META_STATUS=1
 else
   if ! grep -qxF "pr=$URL" "$META"; then

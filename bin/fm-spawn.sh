@@ -170,7 +170,7 @@ esac
 # non-spawn-capable backends. The resolved value is
 # recorded in meta only when it is NOT tmux (fm-teardown.sh and fm-watch.sh's
 # window_backend/fm_backend_of_meta already treat an absent backend= as tmux),
-# so the default path's meta stays byte-identical.
+# so absent backend= retains the default tmux compatibility contract.
 if [ "$BACKEND_SET" -eq 1 ]; then
   BACKEND=$BACKEND_ARG
 else
@@ -193,6 +193,9 @@ ORCA_ABORT_CLEANUP=0
 ORCA_WORKTREE_ID=
 ORCA_TERMINAL=
 ORCA_PANE_KEY=
+SPAWN_META=
+SPAWN_META_LOCKED=0
+SPAWN_GENERATION=
 
 parse_orca_worktree_result() {
   local raw=$1 rest terminal_rest
@@ -221,40 +224,46 @@ parse_orca_worktree_result() {
 
 orca_spawn_abort_cleanup() {
   local status=$? meta_tmp
-  [ "$ORCA_ABORT_CLEANUP" = 1 ] || return "$status"
-  ORCA_ABORT_CLEANUP=0
-  if [ -n "${ORCA_TERMINAL:-}" ]; then
-    fm_backend_kill orca "$ORCA_TERMINAL" 2>/dev/null || true
-  fi
-  if [ -n "${ORCA_WORKTREE_ID:-}" ]; then
-    if ! fm_backend_remove_worktree orca "$ORCA_WORKTREE_ID" 2>/dev/null; then
-      mkdir -p "$STATE" 2>/dev/null || true
-      if [ -d "$STATE" ]; then
-        meta_tmp=$(mktemp "$STATE/.${ID}.meta.XXXXXX" 2>/dev/null || true)
-        if [ -n "$meta_tmp" ]; then
-          {
-            echo "window=$W"
-            echo "worktree=${WT:-}"
-            echo "project=$PROJ_ABS"
-            echo "harness=$HARNESS"
-            echo "kind=$KIND"
-            echo "mode=${MODE:-no-mistakes}"
-            echo "yolo=${YOLO:-off}"
-            echo "tasktmp=${TASK_TMP:-}"
-            echo "model=${MODEL:-default}"
-            echo "effort=${EFFORT:-default}"
-            echo "backend=orca"
-            echo "orca_worktree_id=$ORCA_WORKTREE_ID"
-            [ -z "${ORCA_TERMINAL:-}" ] || echo "terminal=$ORCA_TERMINAL"
-            [ -z "${ORCA_PANE_KEY:-}" ] || echo "orca_pane_key=$ORCA_PANE_KEY"
-          } > "$meta_tmp" 2>/dev/null || true
-          if ! fm_meta_create_from_file "$STATE/$ID.meta" "$meta_tmp"; then
-            rm -f "$meta_tmp"
-            echo "warning: preserved existing task metadata for $ID; failed Orca cleanup remains unrecorded" >&2
+  if [ "$ORCA_ABORT_CLEANUP" = 1 ]; then
+    ORCA_ABORT_CLEANUP=0
+    if [ -n "${ORCA_TERMINAL:-}" ]; then
+      fm_backend_kill orca "$ORCA_TERMINAL" 2>/dev/null || true
+    fi
+    if [ -n "${ORCA_WORKTREE_ID:-}" ]; then
+      if ! fm_backend_remove_worktree orca "$ORCA_WORKTREE_ID" 2>/dev/null; then
+        mkdir -p "$STATE" 2>/dev/null || true
+        if [ -d "$STATE" ]; then
+          meta_tmp=$(mktemp "$STATE/.${ID}.meta.XXXXXX" 2>/dev/null || true)
+          if [ -n "$meta_tmp" ]; then
+            {
+              echo "window=$W"
+              echo "generation=$SPAWN_GENERATION"
+              echo "worktree=${WT:-}"
+              echo "project=$PROJ_ABS"
+              echo "harness=$HARNESS"
+              echo "kind=$KIND"
+              echo "mode=${MODE:-no-mistakes}"
+              echo "yolo=${YOLO:-off}"
+              echo "tasktmp=${TASK_TMP:-}"
+              echo "model=${MODEL:-default}"
+              echo "effort=${EFFORT:-default}"
+              echo "backend=orca"
+              echo "orca_worktree_id=$ORCA_WORKTREE_ID"
+              [ -z "${ORCA_TERMINAL:-}" ] || echo "terminal=$ORCA_TERMINAL"
+              [ -z "${ORCA_PANE_KEY:-}" ] || echo "orca_pane_key=$ORCA_PANE_KEY"
+            } > "$meta_tmp" 2>/dev/null || true
+            if [ -e "$SPAWN_META" ] || ! mv "$meta_tmp" "$SPAWN_META"; then
+              rm -f "$meta_tmp"
+              echo "warning: preserved existing task metadata for $ID; failed Orca cleanup remains unrecorded" >&2
+            fi
           fi
         fi
       fi
     fi
+  fi
+  if [ "$SPAWN_META_LOCKED" = 1 ]; then
+    fm_meta_lock_release "$SPAWN_META"
+    SPAWN_META_LOCKED=0
   fi
   return "$status"
 }
@@ -297,6 +306,7 @@ if [ "${#POS[@]}" -gt 0 ] && [ "${POS[0]}" != "$idpart" ] && case "$idpart" in *
   exit "$rc"
 fi
 ID=${POS[0]}
+SPAWN_META="$STATE/$ID.meta"
 PROJ=
 ARG3=
 FIRSTMATE_HOME=
@@ -622,6 +632,21 @@ if [ "$KIND" = secondmate ]; then
   [ -n "$FIRSTMATE_HOME" ] || { echo "error: no firstmate home supplied or registered for $ID" >&2; exit 1; }
   PROJ_ABS=$(validate_firstmate_home_for_spawn "$ID" "$FIRSTMATE_HOME")
   WT="$PROJ_ABS"
+  mkdir -p "$STATE"
+  fm_meta_lock_acquire "$SPAWN_META" || exit 1
+  SPAWN_META_LOCKED=1
+  current_generation=$(fm_meta_value_unlocked "$SPAWN_META" generation 2>/dev/null || true)
+  current_kind=$(fm_meta_value_unlocked "$SPAWN_META" kind 2>/dev/null || true)
+  if [ -e "$SPAWN_META" ] && { [ -z "${FM_SPAWN_REPLACE_GENERATION:-}" ] || [ "$current_generation" != "$FM_SPAWN_REPLACE_GENERATION" ] || [ "$current_kind" != secondmate ] || ! fm_meta_is_active_unlocked "$SPAWN_META"; }; then
+    echo "error: task metadata already exists for $ID at $SPAWN_META" >&2
+    exit 1
+  fi
+  if [ -e "$SPAWN_META" ]; then
+    replaced_backend=$(fm_backend_of_meta "$SPAWN_META")
+    replaced_target=$(fm_backend_target_of_meta "$SPAWN_META")
+    [ -z "$replaced_target" ] || fm_backend_kill "$replaced_backend" "$replaced_target" 2>/dev/null || true
+  fi
+  SPAWN_GENERATION=$(fm_meta_new_generation) || exit 1
   # Local-HEAD sync: before launch, fast-forward this secondmate's worktree to the
   # PRIMARY checkout's current default-branch commit, so a freshly spawned or
   # recovery-respawned secondmate always runs the primary's version (AGENTS.md
@@ -660,6 +685,11 @@ else
   PROJ_ABS="$(cd "$(resolve_project_dir_arg "$PROJ")" && pwd)"
   WT=""
   BRIEF="$DATA/$ID/brief.md"
+  mkdir -p "$STATE"
+  fm_meta_lock_acquire "$SPAWN_META" || exit 1
+  SPAWN_META_LOCKED=1
+  [ ! -e "$SPAWN_META" ] || { echo "error: task metadata already exists for $ID at $SPAWN_META" >&2; exit 1; }
+  SPAWN_GENERATION=$(fm_meta_new_generation) || exit 1
 fi
 [ -f "$BRIEF" ] || { echo "error: no brief at $BRIEF" >&2; exit 1; }
 
@@ -1021,6 +1051,7 @@ META_WINDOW=$T
 [ "$BACKEND" = orca ] && META_WINDOW=$W
 META_TMP=$(mktemp "$STATE/.${ID}.meta.XXXXXX")
 {
+  echo "generation=$SPAWN_GENERATION"
   echo "window=$META_WINDOW"
   echo "worktree=$WT"
   echo "project=$PROJ_ABS"
@@ -1032,7 +1063,7 @@ META_TMP=$(mktemp "$STATE/.${ID}.meta.XXXXXX")
   echo "model=${MODEL:-default}"
   echo "effort=${EFFORT:-default}"
   # backend= is written only for a non-default (non-tmux) backend, so the
-  # default path's meta stays byte-identical (absent backend= means tmux;
+  # the default path keeps absent backend= meaning tmux;
   # data/fm-backend-design-d7's P1 compatibility contract).
   [ "$BACKEND" = tmux ] || echo "backend=$BACKEND"
   if [ "$BACKEND" = herdr ]; then
@@ -1060,11 +1091,26 @@ META_TMP=$(mktemp "$STATE/.${ID}.meta.XXXXXX")
     echo "projects=$SECONDMATE_PROJECTS"
   fi
 } > "$META_TMP"
-if ! fm_meta_create_from_file "$STATE/$ID.meta" "$META_TMP"; then
+if [ "$KIND" = secondmate ] && [ -n "${FM_SPAWN_REPLACE_GENERATION:-}" ]; then
+  current_generation=$(fm_meta_value_unlocked "$SPAWN_META" generation 2>/dev/null || true)
+  current_kind=$(fm_meta_value_unlocked "$SPAWN_META" kind 2>/dev/null || true)
+  if [ "$current_generation" != "$FM_SPAWN_REPLACE_GENERATION" ] || [ "$current_kind" != secondmate ] || ! fm_meta_is_active_unlocked "$SPAWN_META"; then
+    rm -f "$META_TMP"
+    echo "error: task metadata changed during secondmate recovery for $ID" >&2
+    exit 1
+  fi
+elif [ -e "$SPAWN_META" ]; then
   rm -f "$META_TMP"
-  echo "error: task metadata already exists for $ID at $STATE/$ID.meta" >&2
+  echo "error: task metadata already exists for $ID at $SPAWN_META" >&2
   exit 1
 fi
+if ! mv "$META_TMP" "$SPAWN_META"; then
+  rm -f "$META_TMP"
+  echo "error: could not record task metadata for $ID at $SPAWN_META" >&2
+  exit 1
+fi
+fm_meta_lock_release "$SPAWN_META"
+SPAWN_META_LOCKED=0
 [ "$BACKEND" = orca ] && ORCA_ABORT_CLEANUP=0
 
 sq_brief=$(shell_quote "$BRIEF")

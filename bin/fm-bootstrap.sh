@@ -97,6 +97,8 @@ STATE="${FM_STATE_OVERRIDE:-$FM_HOME/state}"
 . "$SCRIPT_DIR/fm-x-lib.sh"
 # shellcheck source=bin/fm-backend.sh disable=SC1091
 . "$SCRIPT_DIR/fm-backend.sh"
+# shellcheck source=bin/fm-meta-lib.sh disable=SC1091
+. "$SCRIPT_DIR/fm-meta-lib.sh"
 
 fleet_sync_origin_backed_project_count() {
   local count proj
@@ -275,7 +277,7 @@ secondmate_liveness_sweep() {
   # MID-SESSION is a harder follow-on needing a periodic liveness beacon -
   # explicitly out of scope here.
   [ -d "$STATE" ] || return 0
-  local meta id window harness backend target verdict out
+  local meta id window harness backend target verdict out generation
   for meta in "$STATE"/*.meta; do
     [ -f "$meta" ] || continue
     grep -q '^kind=secondmate$' "$meta" 2>/dev/null || continue
@@ -296,8 +298,11 @@ secondmate_liveness_sweep() {
         echo "SECONDMATE_LIVENESS: secondmate $id: already-live"
         ;;
       dead)
-        fm_backend_kill "$backend" "$target" 2>/dev/null || true
-        if out=$(FM_SPAWN_NO_GUARD=1 "$FM_ROOT/bin/fm-spawn.sh" "$id" --secondmate 2>&1); then
+        generation=$(fm_meta_ensure_generation "$meta") || {
+          echo "SECONDMATE_LIVENESS: secondmate $id: respawn failed: task metadata changed during recovery"
+          continue
+        }
+        if out=$(FM_SPAWN_NO_GUARD=1 FM_SPAWN_REPLACE_GENERATION="$generation" "$FM_ROOT/bin/fm-spawn.sh" "$id" --secondmate 2>&1); then
           echo "SECONDMATE_LIVENESS: secondmate $id: respawned"
         else
           echo "SECONDMATE_LIVENESS: secondmate $id: respawn failed: $(first_line "$out")"

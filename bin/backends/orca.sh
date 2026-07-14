@@ -209,31 +209,34 @@ process.stdout.write(handles.join("\n"));
 }
 
 fm_backend_orca_meta_identity() {  # <meta-path>
-  local meta=$1 terminal worktree_id pane_key status=0
+  local meta=$1 terminal worktree_id pane_key generation status=0
   fm_meta_lock_acquire "$meta" || return 1
-  if [ -f "$meta" ]; then
+  if [ -f "$meta" ] && fm_meta_is_active_unlocked "$meta"; then
     terminal=$(grep '^terminal=' "$meta" 2>/dev/null | tail -1 | cut -d= -f2- || true)
     worktree_id=$(grep '^orca_worktree_id=' "$meta" 2>/dev/null | tail -1 | cut -d= -f2- || true)
     pane_key=$(grep '^orca_pane_key=' "$meta" 2>/dev/null | tail -1 | cut -d= -f2- || true)
+    generation=$(fm_meta_value_unlocked "$meta" generation)
   else
     status=1
   fi
   fm_meta_lock_release "$meta"
   [ "$status" -eq 0 ] || return "$status"
-  printf '%s\t%s\t%s' "$terminal" "$worktree_id" "$pane_key"
+  printf '%s\t%s\t%s\t%s' "$terminal" "$worktree_id" "$pane_key" "$generation"
 }
 
-fm_backend_orca_meta_set_terminal() {  # <meta-path> <expected-terminal> <expected-worktree-id> <expected-pane-key> <terminal-handle>
-  local meta=$1 expected_terminal=$2 expected_worktree_id=$3 expected_pane_key=$4 terminal=$5
-  local current_terminal current_worktree_id current_pane_key tmp status=0
+fm_backend_orca_meta_set_terminal() {  # <meta-path> <expected-terminal> <expected-worktree-id> <expected-pane-key> <expected-generation> <terminal-handle>
+  local meta=$1 expected_terminal=$2 expected_worktree_id=$3 expected_pane_key=$4 expected_generation=$5 terminal=$6
+  local current_terminal current_worktree_id current_pane_key current_generation tmp status=0
   fm_meta_lock_acquire "$meta" || return 1
-  if [ -f "$meta" ]; then
+  if [ -f "$meta" ] && fm_meta_is_active_unlocked "$meta"; then
     current_terminal=$(grep '^terminal=' "$meta" 2>/dev/null | tail -1 | cut -d= -f2- || true)
     current_worktree_id=$(grep '^orca_worktree_id=' "$meta" 2>/dev/null | tail -1 | cut -d= -f2- || true)
     current_pane_key=$(grep '^orca_pane_key=' "$meta" 2>/dev/null | tail -1 | cut -d= -f2- || true)
+    current_generation=$(fm_meta_value_unlocked "$meta" generation)
     [ "$current_terminal" = "$expected_terminal" ] || status=1
     [ "$current_worktree_id" = "$expected_worktree_id" ] || status=1
     [ "$current_pane_key" = "$expected_pane_key" ] || status=1
+    [ "$current_generation" = "$expected_generation" ] || status=1
   else
     status=1
   fi
@@ -262,8 +265,8 @@ fm_backend_orca_meta_set_terminal() {  # <meta-path> <expected-terminal> <expect
 # Resolve the remint-stable pane identity inside exactly one recorded worktree.
 # Every candidate is shown before any decision; one unreadable candidate makes
 # the entire attempt unresolved because it could be the true match.
-fm_backend_orca_recover_terminal() {  # <meta-path> <expected-terminal> <expected-worktree-id> <expected-pane-key>
-  local meta=${1:-} expected_terminal=$2 worktree_id=$3 pane_key=$4 list_out handles handle show_out record candidate_worktree rest candidate_pane connected unresolved=0
+fm_backend_orca_recover_terminal() {  # <meta-path> <expected-terminal> <expected-worktree-id> <expected-pane-key> <expected-generation>
+  local meta=${1:-} expected_terminal=$2 worktree_id=$3 pane_key=$4 expected_generation=$5 list_out handles handle show_out record candidate_worktree rest candidate_pane connected unresolved=0
   local -a matches=() connected_matches=()
   if [ -z "$worktree_id" ] || ! fm_backend_orca_pane_key_valid "$pane_key"; then
     echo "error: Orca endpoint recovery unavailable: missing or invalid orca_worktree_id/orca_pane_key in $meta" >&2
@@ -315,7 +318,7 @@ fm_backend_orca_recover_terminal() {  # <meta-path> <expected-terminal> <expecte
         echo "error: Orca endpoint disconnected: terminal ${matches[0]} matches pane $pane_key but is not connected" >&2
         return 1
       fi
-      fm_backend_orca_meta_set_terminal "$meta" "$expected_terminal" "$worktree_id" "$pane_key" "${matches[0]}" || {
+      fm_backend_orca_meta_set_terminal "$meta" "$expected_terminal" "$worktree_id" "$pane_key" "$expected_generation" "${matches[0]}" || {
         echo "error: Orca endpoint recovery found ${matches[0]} but could not update $meta" >&2
         return 1
       }
@@ -339,14 +342,16 @@ fm_backend_orca_raw_close() { orca terminal close --terminal "$1" --json; }
 # Run one handle operation and retry it once only when the first result carries
 # the exact terminal_handle_stale code and metadata resolves one replacement.
 fm_backend_orca_with_recovery() {  # <meta-path-or-empty> <terminal-id> <raw-fn> [args...]
-  local meta=${1:-} terminal=$2 fn=$3 out status code recovered identity rest expected_terminal worktree_id pane_key
+  local meta=${1:-} terminal=$2 fn=$3 out status code recovered identity rest expected_terminal worktree_id pane_key generation
   shift 3
   if [ -n "$meta" ] && [ -f "$meta" ]; then
     identity=$(fm_backend_orca_meta_identity "$meta" 2>/dev/null || true)
     expected_terminal=${identity%%$'\t'*}
     rest=${identity#*$'\t'}
     worktree_id=${rest%%$'\t'*}
-    pane_key=${rest#*$'\t'}
+    rest=${rest#*$'\t'}
+    pane_key=${rest%%$'\t'*}
+    generation=${rest#*$'\t'}
     [ -z "$expected_terminal" ] || terminal=$expected_terminal
   fi
   if out=$("$fn" "$terminal" "$@" 2>/dev/null); then status=0; else status=$?; fi
@@ -363,7 +368,7 @@ fm_backend_orca_with_recovery() {  # <meta-path-or-empty> <terminal-id> <raw-fn>
     [ -z "$out" ] || printf '%s\n' "$out" >&2
     return 1
   fi
-  recovered=$(fm_backend_orca_recover_terminal "$meta" "$expected_terminal" "$worktree_id" "$pane_key") || return 1
+  recovered=$(fm_backend_orca_recover_terminal "$meta" "$expected_terminal" "$worktree_id" "$pane_key" "${generation:-}") || return 1
   echo "info: recovered Orca terminal handle $terminal -> $recovered" >&2
   if out=$("$fn" "$recovered" "$@" 2>/dev/null); then status=0; else status=$?; fi
   [ "$status" -eq 0 ] || return 1

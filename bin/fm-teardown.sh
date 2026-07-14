@@ -103,6 +103,13 @@ FORCE=${2:-}
 META="$STATE/$ID.meta"
 [ -f "$META" ] || { echo "error: no meta for task $ID at $META" >&2; exit 1; }
 META_IDENTITY=$(fm_meta_identity "$META") || { echo "error: could not capture task identity from $META" >&2; exit 1; }
+TEARDOWN_OWNER=
+TEARDOWN_IDENTITY=
+
+release_teardown_claim() {
+  [ -z "$TEARDOWN_OWNER" ] || fm_meta_release_teardown "$META" "$TEARDOWN_OWNER" 2>/dev/null || true
+}
+trap release_teardown_claim EXIT
 WT=$(grep '^worktree=' "$META" | cut -d= -f2-)
 T=$(grep '^window=' "$META" | cut -d= -f2-)
 PROJ=$(grep '^project=' "$META" | cut -d= -f2-)
@@ -959,10 +966,6 @@ if [ "$KIND" = secondmate ] && [ "$FORCE" != "--force" ]; then
   fi
 fi
 
-if [ "$KIND" = secondmate ] && [ "$FORCE" = "--force" ]; then
-  cleanup_firstmate_home_children "$HOME_PATH"
-fi
-
 if [ "$KIND" = scout ] && [ "$FORCE" != "--force" ]; then
   REPORT="$DATA/$ID/report.md"
   if [ ! -f "$REPORT" ]; then
@@ -982,6 +985,13 @@ if [ "$BACKEND" = orca ] && [ "$KIND" != scout ] && [ "$KIND" != secondmate ] &&
   ORCA_PATH_MATCH_VERIFIED=1
 fi
 
+TEARDOWN_OWNER=$(fm_meta_new_generation) || { echo "error: could not create teardown owner for $ID" >&2; exit 1; }
+TEARDOWN_IDENTITY=$(fm_meta_claim_teardown "$META" "$META_IDENTITY" "$TEARDOWN_OWNER") || {
+  TEARDOWN_OWNER=
+  echo "error: task metadata identity changed before teardown; refusing to modify task $ID" >&2
+  exit 1
+}
+
 if [ -d "$WT" ] && [ "$FORCE" != "--force" ]; then
   if validate_worktree_teardown_safety; then
     :
@@ -994,6 +1004,10 @@ if [ -d "$WT" ] && [ "$FORCE" != "--force" ]; then
       exit 1
     fi
   fi
+fi
+
+if [ "$KIND" = secondmate ] && [ "$FORCE" = "--force" ]; then
+  cleanup_firstmate_home_children "$HOME_PATH"
 fi
 
 # Best-effort: drop the local task branch so the shared repo does not accumulate refs.
@@ -1049,12 +1063,13 @@ fm_backend_clear_transition "$BACKEND" "$STATE" "$T" || true
 # Remove the per-task temp root (/tmp/fm-<id>/, incl. its gotmp/) recorded by spawn.
 # Read before the state-file rm below; empty (pre-fix tasks without tasktmp=) is a no-op.
 [ -n "$TASK_TMP" ] && rm -rf "$TASK_TMP"
-fm_meta_remove_if_identity "$STATE/$ID.meta" "$META_IDENTITY" \
+fm_meta_remove_if_identity "$STATE/$ID.meta" "$TEARDOWN_IDENTITY" \
   "$STATE/$ID.status" "$STATE/$ID.turn-ended" "$STATE/$ID.check.sh" \
   "$STATE/$ID.pi-ext.ts" "$STATE/$ID.grok-turnend-token" || {
   echo "error: task metadata identity changed during teardown; refusing to delete $STATE/$ID.meta" >&2
   exit 1
 }
+TEARDOWN_OWNER=
 if [ "$KIND" != scout ] && [ "$KIND" != secondmate ] && [ "$MODE" != local-only ]; then
   "$FM_ROOT/bin/fm-fleet-sync.sh" "$PROJ" || true
 fi

@@ -24,6 +24,9 @@ fm_meta_lock_acquire "$META" || exit 1
 if [ ! -f "$META" ]; then
   echo "error: no meta for task $ID at $META" >&2
   STATUS=1
+elif ! fm_meta_is_active_unlocked "$META"; then
+  echo "error: task $ID is being torn down" >&2
+  STATUS=1
 elif ! grep -qx 'kind=scout' "$META"; then
   echo "error: task $ID is not a scout task (kind=scout not in meta)" >&2
   STATUS=1

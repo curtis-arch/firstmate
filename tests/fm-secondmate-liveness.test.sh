@@ -250,6 +250,7 @@ add_sm_home() {
   printf '# Firstmate\n' > "$home/AGENTS.md"
   printf 'charter\n' > "$home/data/charter.md"
   {
+    printf 'generation=initial-%s\n' "$id"
     printf 'window=%s\n' "$window"
     printf 'kind=secondmate\n'
     printf 'harness=%s\n' "$harness"
@@ -279,7 +280,34 @@ test_sweep_respawns_confirmed_dead_secondmate() {
     "the stale endpoint must be killed before respawn (tmux refuses a same-named window over a live one)"
   assert_contains "$(cat "$log")" "new-window" \
     "a confirmed-dead secondmate should actually be relaunched"
+  assert_grep 'generation=' "$w/home/state/sm1.meta" \
+    "a respawned secondmate must retain a task generation"
+  assert_not_contains "$(cat "$w/home/state/sm1.meta")" "generation=initial-sm1" \
+    "a respawned secondmate must receive a new task generation"
   pass "sweep: a confirmed-dead secondmate endpoint is killed and respawned"
+}
+
+test_direct_duplicate_secondmate_refuses_before_mutation() {
+  local w fb tmuxfb log out status
+  w=$(new_world direct-duplicate)
+  add_sm_home "$w" sm1 firstmate:fm-sm1
+  fb=$(make_toolchain "$w"); tmuxfb=$(make_liveness_tmux "$w")
+  log="$w/calls.log"; : > "$log"
+
+  set +e
+  out=$(PATH="$tmuxfb:$fb:$BASE_PATH" TMUX='' FM_BACKEND=tmux FM_HOME="$w/home" \
+    FM_TEST_PANE_CMD=zsh FM_TMUX_CALL_LOG="$log" FM_SPAWN_NO_GUARD=1 \
+    "$ROOT/bin/fm-spawn.sh" sm1 --secondmate 2>&1)
+  status=$?
+  set -e
+
+  [ "$status" -ne 0 ] || fail "a direct duplicate secondmate spawn should fail"
+  assert_contains "$out" "task metadata already exists" \
+    "a direct duplicate secondmate spawn should fail on its lifecycle reservation"
+  [ ! -s "$log" ] || fail "a refused duplicate secondmate spawn mutated its endpoint"
+  assert_grep 'generation=initial-sm1' "$w/home/state/sm1.meta" \
+    "a refused duplicate secondmate spawn changed the live task generation"
+  pass "spawn: duplicate secondmate ids refuse before endpoint mutation"
 }
 
 test_sweep_leaves_alive_secondmate_untouched() {
@@ -390,6 +418,7 @@ test_tmux_agent_alive_classifies
 test_herdr_agent_alive_maps_pane_agent_state
 test_agent_alive_dispatcher_routes_and_falls_back
 test_sweep_respawns_confirmed_dead_secondmate
+test_direct_duplicate_secondmate_refuses_before_mutation
 test_sweep_leaves_alive_secondmate_untouched
 test_sweep_never_acts_on_inconclusive_reading
 test_sweep_never_acts_on_unverified_harness_dead_reading

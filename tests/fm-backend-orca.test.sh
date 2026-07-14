@@ -694,7 +694,7 @@ test_spawn_preserves_orca_metadata_when_abort_cleanup_fails() {
   pass "fm-spawn.sh --backend orca: preserves metadata when abort cleanup fails"
 }
 
-test_spawn_releases_orca_resources_when_metadata_write_fails() {
+test_spawn_refuses_unwritable_metadata_before_orca_mutation() {
   local proj wt data state_file config id out status
   id="orcametafailz9"
   proj="$TMP_ROOT/meta-fail-project"
@@ -718,12 +718,12 @@ test_spawn_releases_orca_resources_when_metadata_write_fails() {
   status=$?
   [ "$status" -ne 0 ] || fail "Orca spawn should fail when metadata cannot be written"
   assert_contains "$out" "File exists" "spawn should fail at the state directory creation point"
-  assert_contains "$(cat "$LOG")" $'orca\x1f''terminal'$'\x1f''close'$'\x1f''--terminal'$'\x1f''term-meta-fail'$'\x1f''--json' \
-    "Orca spawn should close the recorded terminal when a later abort occurs"
-  assert_contains "$(cat "$LOG")" $'orca\x1f''worktree'$'\x1f''rm'$'\x1f''--worktree'$'\x1f''id:wt-meta-fail'$'\x1f''--force'$'\x1f''--json' \
-    "Orca spawn should remove the recorded worktree when a later abort occurs"
-  assert_absent "$state_file/$id.meta" "metadata-write abort should not leave metadata after successful cleanup"
-  pass "fm-spawn.sh --backend orca: releases terminal and worktree on later aborts"
+  assert_not_contains "$(cat "$LOG")" $'orca\x1f''worktree'$'\x1f''create' \
+    "Orca spawn should reserve writable metadata before creating a worktree"
+  assert_not_contains "$(cat "$LOG")" $'orca\x1f''terminal'$'\x1f''create' \
+    "Orca spawn should reserve writable metadata before creating a terminal"
+  assert_absent "$state_file/$id.meta" "preflight metadata refusal should not leave metadata"
+  pass "fm-spawn.sh --backend orca: refuses unwritable metadata before mutation"
 }
 
 test_peek_send_and_crew_state_route_through_orca_meta() {
@@ -1370,6 +1370,7 @@ test_spawn_rejects_placeholder_pane_key_without_failing() {
 orca_recovery_meta() {  # <state> <id> <terminal> <pane-key>
   mkdir -p "$1"
   cat > "$1/$2.meta" <<EOF
+generation=fixture-$2
 window=fm-$2
 backend=orca
 orca_worktree_id=repo::/scratch
@@ -1500,7 +1501,7 @@ orca_terminal_metadata_update_uses_shared_lock() {
   PATH="$FB:$PATH" FM_STATE_OVERRIDE="$state" bash -c '
     . "$0/bin/backends/orca.sh"
     fm_backend_orca_meta_set_terminal "$1" term-old repo::/scratch \
-      11111111-1111-4111-8111-111111111111:22222222-2222-4222-8222-222222222222 term-new
+      11111111-1111-4111-8111-111111111111:22222222-2222-4222-8222-222222222222 fixture-recoverlock term-new
   ' "$ROOT" "$meta" &
   setter=$!
   FM_ROOT_OVERRIDE="$ROOT" FM_STATE_OVERRIDE="$state" \
@@ -1544,7 +1545,7 @@ orca_terminal_metadata_cas_rejects_reused_task() {
   if FM_STATE_OVERRIDE="$state" bash -c '
     . "$0/bin/backends/orca.sh"
     fm_backend_orca_meta_set_terminal "$1" term-old repo::/scratch \
-      11111111-1111-4111-8111-111111111111:22222222-2222-4222-8222-222222222222 term-new
+      11111111-1111-4111-8111-111111111111:22222222-2222-4222-8222-222222222222 fixture-recovercas term-new
   ' "$ROOT" "$meta"; then status=0; else status=$?; fi
   [ "$status" -ne 0 ] || fail "terminal metadata CAS accepted a replacement task identity"
   assert_grep 'terminal=term-replacement' "$meta" "terminal metadata CAS overwrote a replacement task"
@@ -1572,7 +1573,7 @@ orca_terminal_metadata_delete_prevents_resurrection() {
   FM_STATE_OVERRIDE="$state" bash -c '
     . "$0/bin/backends/orca.sh"
     fm_backend_orca_meta_set_terminal "$1" term-old repo::/scratch \
-      11111111-1111-4111-8111-111111111111:22222222-2222-4222-8222-222222222222 term-new
+      11111111-1111-4111-8111-111111111111:22222222-2222-4222-8222-222222222222 fixture-recoverdelete term-new
   ' "$ROOT" "$meta" &
   setter=$!
   sleep 0.05
@@ -1638,6 +1639,39 @@ meta_compare_delete_rejects_replacement_identity() {
   [ "$status" -ne 0 ] || fail "metadata compare-delete accepted a replacement task"
   assert_grep 'terminal=term-replacement' "$meta" "metadata compare-delete removed the replacement task"
   pass "teardown metadata compare-delete rejects replacement identity"
+}
+
+teardown_claim_blocks_task_mutations() {
+  local state meta identity owner claimed status
+  orca_case teardown-claim
+  state="$CASE_DIR/state"
+  meta="$state/claim.meta"
+  orca_recovery_meta "$state" claim term-old \
+    11111111-1111-4111-8111-111111111111:22222222-2222-4222-8222-222222222222
+  identity=$(FM_STATE_OVERRIDE="$state" bash -c '. "$0/bin/fm-meta-lib.sh"; fm_meta_identity "$1"' "$ROOT" "$meta")
+  owner=owner-one
+  claimed=$(FM_STATE_OVERRIDE="$state" bash -c '. "$0/bin/fm-meta-lib.sh"; fm_meta_claim_teardown "$1" "$2" "$3"' \
+    "$ROOT" "$meta" "$identity" "$owner") || fail "teardown could not claim live metadata"
+  assert_grep 'lifecycle=teardown:owner-one' "$meta" "teardown claim was not persisted"
+
+  if FM_STATE_OVERRIDE="$state" bash -c '
+    . "$0/bin/backends/orca.sh"
+    fm_backend_orca_meta_set_terminal "$1" term-old repo::/scratch \
+      11111111-1111-4111-8111-111111111111:22222222-2222-4222-8222-222222222222 fixture-claim term-new
+  ' "$ROOT" "$meta"; then status=0; else status=$?; fi
+  [ "$status" -ne 0 ] || fail "Orca recovery mutated teardown-owned metadata"
+  if FM_ROOT_OVERRIDE="$ROOT" FM_STATE_OVERRIDE="$state" "$ROOT/bin/fm-promote.sh" claim >/dev/null 2>&1; then
+    status=0
+  else
+    status=$?
+  fi
+  [ "$status" -ne 0 ] || fail "promotion mutated teardown-owned metadata"
+  assert_grep 'terminal=term-old' "$meta" "teardown ownership allowed terminal replacement"
+  assert_grep 'kind=scout' "$meta" "teardown ownership allowed promotion"
+  FM_STATE_OVERRIDE="$state" bash -c '. "$0/bin/fm-meta-lib.sh"; fm_meta_remove_if_identity "$1" "$2"' \
+    "$ROOT" "$meta" "$claimed" || fail "teardown owner could not compare-delete its metadata"
+  assert_absent "$meta" "teardown-owned metadata was not removed"
+  pass "teardown ownership blocks recovery and promotion mutations"
 }
 
 orca_recovery_triggers_only_for_stale_and_requires_new_metadata() {
@@ -1838,6 +1872,7 @@ orca_terminal_metadata_cas_rejects_reused_task
 orca_terminal_metadata_delete_prevents_resurrection
 pr_check_does_not_resurrect_deleted_metadata
 meta_compare_delete_rejects_replacement_identity
+teardown_claim_blocks_task_mutations
 orca_recovery_triggers_only_for_stale_and_requires_new_metadata
 orca_pane_key_validation_is_strict
 orca_snapshot_selects_only_recorded_worktree_and_matching_agent
@@ -1857,7 +1892,7 @@ test_spawn_refuses_orca_when_runtime_not_ready
 test_spawn_refuses_orca_nonisolated_worktree
 test_spawn_removes_orca_worktree_when_terminal_create_fails
 test_spawn_preserves_orca_metadata_when_abort_cleanup_fails
-test_spawn_releases_orca_resources_when_metadata_write_fails
+test_spawn_refuses_unwritable_metadata_before_orca_mutation
 test_peek_send_and_crew_state_route_through_orca_meta
 test_peek_and_crew_state_fail_closed_on_orca_error_json
 test_target_exists_rejects_orca_error_json
