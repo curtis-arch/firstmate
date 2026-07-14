@@ -112,6 +112,87 @@ fm_backend_orca_run_json() {
   printf '%s' "$out" | fm_backend_orca_json_ok
 }
 
+# fm_backend_orca_terminal_identity: normalize the durable identity exposed by
+# `terminal show`. `terminal list` is deliberately not used: CLI-created
+# terminals can expose non-joinable `pty:` placeholders there instead of the
+# tab/leaf UUIDs used by worktree agent pane keys.
+fm_backend_orca_terminal_identity() {  # <terminal-show-json>
+  printf '%s' "$1" | node -e '
+const fs = require("fs");
+let data;
+try {
+  data = JSON.parse(fs.readFileSync(0, "utf8"));
+} catch (_) {
+  process.exit(1);
+}
+if (data.ok !== true || !data.result || !data.result.terminal) process.exit(1);
+const terminal = data.result.terminal;
+const fields = [terminal.worktreeId, terminal.tabId, terminal.leafId];
+if (!fields.every((value) => typeof value === "string" && value.length > 0)) process.exit(1);
+if (terminal.tabId.startsWith("pty:") || terminal.leafId.startsWith("pty:")) process.exit(1);
+if (terminal.connected !== true || terminal.writable !== true) process.exit(1);
+process.stdout.write(`${terminal.worktreeId}\t${terminal.tabId}:${terminal.leafId}`);
+'
+}
+
+# fm_backend_orca_agent_snapshot: resolve one recorded endpoint to one agent in
+# one recorded worktree. Every rejected or unreadable shape normalizes to
+# `unknown`; only E1b-observed working/done/no-agent shapes are returned.
+fm_backend_orca_agent_snapshot() {  # <terminal-id> <recorded-worktree-id>
+  local terminal=${1:-} worktree_id=${2:-} show_out identity shown_worktree pane_key ps_out snapshot
+  [ -n "$terminal" ] && [ -n "$worktree_id" ] || { printf 'unknown'; return 0; }
+  fm_backend_orca_tool_check >/dev/null 2>&1 || { printf 'unknown'; return 0; }
+  show_out=$(orca terminal show --terminal "$terminal" --json 2>/dev/null) || { printf 'unknown'; return 0; }
+  identity=$(fm_backend_orca_terminal_identity "$show_out" 2>/dev/null) || { printf 'unknown'; return 0; }
+  shown_worktree=${identity%%$'\t'*}
+  pane_key=${identity#*$'\t'}
+  [ "$shown_worktree" = "$worktree_id" ] || { printf 'unknown'; return 0; }
+  ps_out=$(orca worktree ps --json 2>/dev/null) || { printf 'unknown'; return 0; }
+  snapshot=$(printf '%s' "$ps_out" | node -e '
+const fs = require("fs");
+const worktreeId = process.argv[1];
+const paneKey = process.argv[2];
+let data;
+try {
+  data = JSON.parse(fs.readFileSync(0, "utf8"));
+} catch (_) {
+  process.exit(1);
+}
+if (data.ok !== true || !data.result || !Array.isArray(data.result.worktrees)) process.exit(1);
+const worktrees = data.result.worktrees.filter((worktree) => worktree && worktree.worktreeId === worktreeId);
+if (worktrees.length !== 1 || !Array.isArray(worktrees[0].agents)) process.exit(1);
+const agents = worktrees[0].agents.filter((agent) => agent && agent.paneKey === paneKey);
+if (agents.length === 0) {
+  process.stdout.write("no-agent");
+  process.exit(0);
+}
+if (agents.length !== 1) process.exit(1);
+const state = agents[0].state;
+if (state !== "working" && state !== "done") process.exit(1);
+process.stdout.write(state);
+' "$worktree_id" "$pane_key" 2>/dev/null) || { printf 'unknown'; return 0; }
+  case "$snapshot" in
+    working|done|no-agent) printf '%s' "$snapshot" ;;
+    *) printf 'unknown' ;;
+  esac
+}
+
+fm_backend_orca_busy_state() {  # <terminal-id> <recorded-worktree-id>
+  case "$(fm_backend_orca_agent_snapshot "$@")" in
+    working) printf 'busy' ;;
+    done) printf 'idle' ;;
+    *) printf 'unknown' ;;
+  esac
+}
+
+fm_backend_orca_agent_alive() {  # <terminal-id> <recorded-worktree-id>
+  case "$(fm_backend_orca_agent_snapshot "$@")" in
+    working|done) printf 'alive' ;;
+    no-agent) printf 'dead' ;;
+    *) printf 'unknown' ;;
+  esac
+}
+
 fm_backend_orca_repo_ensure() {  # <project-path>
   local project=$1 out repo_id
   fm_backend_orca_tool_check || return 1

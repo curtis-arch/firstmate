@@ -81,7 +81,8 @@ Operation routing:
   A slash-command popup that closes by filling an argument-hint placeholder still reads as pending, so the retry loop sends the required second Enter rather than treating the first Enter as a submission.
   The bordered row is classified through the shared composer classifier; a bare shell prompt has no genuine composer row and reads `unknown`, not confirmed empty.
 - `fm-send.sh --key Enter` and `--key C-c` are supported.
-- `fm-watch.sh` treats Orca as a pull backend with no native busy-state primitive, so it falls back to the same terminal-tail busy regex used for tmux, zellij, and cmux.
+- `fm-watch.sh` joins the recorded terminal to Orca's native per-agent state through `terminal show` and `worktree ps`.
+  A verified `working` agent is busy and a verified turn-complete `done` agent is idle; every unknown result retains the existing terminal-tail fallback.
 - `fm-crew-state.sh` reads the recorded Orca terminal when no no-mistakes run-step applies.
 
 Teardown:
@@ -173,6 +174,39 @@ P1 is therefore blocked and production remains unchanged: Orca busy state and ag
 Fixture tests pin the conservative fallback, but fixtures are not E1 evidence.
 The next eligible work is E1 again with a proven endpoint-to-agent relation and direct idle plus no-agent/plain-shell observations.
 E2/P2 durable endpoint re-resolution is not unlocked.
+
+### Semantic liveness E1b - P1 accepted (2026-07-14)
+
+The E1 re-run against Orca application `1.4.139` proved the missing identity relation on disposable Firstmate-created task `orca-live-contract-e1`.
+The complete scout report is `/Users/johncurtis/projects/firstmate/data/orca-live-contract-e1/report.md`.
+The supervising Firstmate then completed the report's requested E1b transition observation from a shell that could reach the Orca runtime.
+
+The exact read-only join commands were:
+
+```console
+$ orca terminal show --terminal term_362be563-3b68-4cb1-8ba8-70a90bf47f50 --json
+{"ok":true,"result":{"terminal":{"worktreeId":"69c04545-e3dd-467f-9b35-0eb698cc41a7::/Users/johncurtis/orca/workspaces/firstmate/fm-orca-live-contract-e1","tabId":"6d34d759-95c6-4ecc-8c25-3eb6223b9e23","leafId":"7d4d7c59-b905-4b1c-8ebe-10225f653d46","connected":true,"writable":true}}}
+
+$ orca worktree ps --json
+{"ok":true,"result":{"worktrees":[{"worktreeId":"69c04545-e3dd-467f-9b35-0eb698cc41a7::/Users/johncurtis/orca/workspaces/firstmate/fm-orca-live-contract-e1","agents":[{"paneKey":"6d34d759-95c6-4ecc-8c25-3eb6223b9e23:7d4d7c59-b905-4b1c-8ebe-10225f653d46","state":"working","agentType":"claude"}]}]}}}
+```
+
+The exact recorded `orca_worktree_id` matched exactly one worktree, and `terminal show`'s `tabId:leafId` matched exactly one `agents[].paneKey` in that worktree.
+`terminal list` is intentionally excluded from production because CLI-created terminals can expose non-joinable `pty:` placeholder ids there.
+The matching worker reported `working` during a real turn.
+After the turn completed while Claude remained open, the same matched agent reported `done`, and the recorded terminal remained connected and writable.
+After a clean `/exit`, the same terminal remained connected and writable as a plain shell while the exact worktree's `agents[]` became empty.
+
+P1 therefore maps only these observed shapes:
+
+- Exact unique matched agent state `working` becomes semantic `busy` and liveness `alive`.
+- Exact unique matched agent state `done` becomes semantic `idle` and liveness `alive`.
+- No matching agent in the exact worktree, while the exact terminal remains connected and writable, becomes liveness `dead`.
+- `ok:false`, malformed JSON, command failure, cross-worktree identity, `pty:` placeholders, duplicate worktrees, duplicate agents, disconnected or non-writable terminals, and unknown states remain `unknown`.
+
+The normalized snapshot parser lives in `bin/backends/orca.sh` and is reached only through `bin/fm-backend.sh`.
+Runtime-global aggregate worktree status and first-agent selection are never used.
+Orca remains a pull backend, so this does not add event waits or replace the watcher loop.
 Real-Orca smoke verification was run against `/usr/local/bin/orca` with `/Applications/Orca.app` reporting bundle version `1.4.116`; `orca status --json` reported `result.runtime.reachable=true` and `result.runtime.state="ready"`.
 The verified terminal creation handle field is `result.terminal.handle` from `orca terminal create --json`; worktree creation returned `result.worktree.id` and `result.worktree.path` in the same smoke run.
 Firstmate intentionally ignores speculative terminal-handle shapes such as bare `result.id` and nested `result.worktree.terminal` until a real Orca smoke run proves them.
@@ -182,6 +216,8 @@ Fake-Orca tests cover:
 - helper parsing for repo registration, worktree creation, verified implicit-terminal reuse, terminal creation, terminal sends, and worktree removal;
 - rejection of undocumented terminal-handle result shapes;
 - runtime readiness gating through `orca status --json`;
+- exact `terminal show` to `worktree ps` semantic joins, including `working`, turn-complete `done`, and post-exit agent disappearance;
+- fail-closed handling for malformed/error JSON, cross-worktree and duplicate identities, placeholder ids, disconnected terminals, and unknown states;
 - `fm-spawn.sh --backend orca` metadata creation and harness launch;
 - `fm-peek.sh`, `fm-send.sh`, and `fm-crew-state.sh` routing through recorded Orca metadata;
 - slash-command popup placeholder handling that requires a second Enter before `fm-send.sh` reports submission;

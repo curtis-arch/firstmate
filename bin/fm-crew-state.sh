@@ -169,8 +169,13 @@ crew_pane_is_busy() {  # <target>
   case "$TASK_BACKEND" in
     tmux) fm_pane_is_busy "$1" ;;
     *)
-      local bs tail40
-      bs=$(fm_backend_busy_state "$TASK_BACKEND" "$1" 2>/dev/null)
+      local bs tail40 worktree_id
+      if [ "$TASK_BACKEND" = orca ]; then
+        worktree_id=$(fm_meta_get "$META" orca_worktree_id)
+        bs=$(fm_backend_busy_state orca "$1" "$worktree_id" 2>/dev/null)
+      else
+        bs=$(fm_backend_busy_state "$TASK_BACKEND" "$1" 2>/dev/null)
+      fi
       case "$bs" in
         busy) return 0 ;;
         *)

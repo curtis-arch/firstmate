@@ -577,11 +577,17 @@ task_window_backend() {  # <window> <state>
 }
 
 stale_window_is_busy() {  # <window> <state>
-  local win=$1 state=$2 backend label tail40 bs
+  local win=$1 state=$2 backend label tail40 bs meta worktree_id
   backend=$(task_window_backend "$win" "$state")
   label="fm-$(window_to_task "$win" "$state")"
   tail40=$(fm_backend_capture "$backend" "$win" 40 "$label" 2>/dev/null) || return 2
-  bs=$(fm_backend_busy_state "$backend" "$win" 2>/dev/null)
+  if [ "$backend" = orca ]; then
+    meta=$(fm_backend_meta_for_window "$win" "$state" 2>/dev/null || true)
+    worktree_id=$(fm_meta_get "$meta" orca_worktree_id)
+    bs=$(fm_backend_busy_state orca "$win" "$worktree_id" 2>/dev/null)
+  else
+    bs=$(fm_backend_busy_state "$backend" "$win" 2>/dev/null)
+  fi
   case "$bs" in
     busy) return 0 ;;
   esac

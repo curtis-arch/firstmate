@@ -1272,82 +1272,116 @@ test_dispatcher_sources_orca_and_routes_primitives() {
   pass "fm-backend dispatcher: accepts orca and routes capture through bin/backends/orca.sh"
 }
 
-# Liveness E1 refusal coverage.
-# The 2026-07-12 runtime observation did not expose a relation between the
-# recorded term_ handle and agents[].paneKey, so production must not consume
-# even apparently useful agent records until a later experiment proves one.
-orca_liveness_baseline_returns_unknown_before_agents_snapshot_is_consumed() {
+# Semantic liveness fixtures mirror the E1b-observed `terminal show` and
+# `worktree ps` shapes. The join is always tabId:leafId, never terminal list.
+orca_snapshot_selects_only_recorded_worktree_and_matching_agent() {
+  local busy log_text
+  orca_case liveness-exact-join
+  printf '{"ok":true,"result":{"terminal":{"worktreeId":"repo::/scratch","tabId":"tab-a","leafId":"leaf-a","connected":true,"writable":true}}}\n' > "$RESP/1.out"
+  printf '{"ok":true,"result":{"worktrees":[{"worktreeId":"repo::/other","agents":[{"paneKey":"tab-a:leaf-a","state":"done"}]},{"worktreeId":"repo::/scratch","agents":[{"paneKey":"tab-b:leaf-b","state":"done"},{"paneKey":"tab-a:leaf-a","state":"working"}]}]}}\n' > "$RESP/2.out"
+  busy=$( PATH="$FB:$PATH" FM_ORCA_LOG="$LOG" FM_ORCA_RESPONSES="$RESP" \
+    bash -c '. "$0/bin/fm-backend.sh"; fm_backend_busy_state orca term-recorded repo::/scratch' "$ROOT" )
+  [ "$busy" = busy ] || fail "exact recorded worktree/pane join should report busy, got '$busy'"
+  log_text=$(cat "$LOG")
+  assert_contains "$log_text" $'orca\x1f''terminal'$'\x1f''show'$'\x1f''--terminal'$'\x1f''term-recorded'$'\x1f''--json' \
+    "liveness must resolve the exact recorded handle through terminal show"
+  assert_contains "$log_text" $'orca\x1f''worktree'$'\x1f''ps'$'\x1f''--json' \
+    "liveness must read the agent inventory through worktree ps"
+  assert_not_contains "$log_text" $'orca\x1f''terminal'$'\x1f''list' \
+    "liveness must never join through terminal list placeholders"
+  pass "orca_snapshot_selects_only_recorded_worktree_and_matching_agent"
+}
+
+orca_busy_and_alive_map_only_working_and_turn_complete_done() {
   local busy alive
-  orca_case liveness-baseline
-  printf '{"ok":true,"result":{"worktrees":[{"worktreeId":"repo::/scratch","agents":[{"paneKey":"pane:a","state":"working","agentType":"codex"}]}]}}\n' > "$RESP/1.out"
+  orca_case liveness-working-done
+  printf '{"ok":true,"result":{"terminal":{"worktreeId":"repo::/scratch","tabId":"tab-a","leafId":"leaf-a","connected":true,"writable":true}}}\n' > "$RESP/1.out"
+  printf '{"ok":true,"result":{"worktrees":[{"worktreeId":"repo::/scratch","agents":[{"paneKey":"tab-a:leaf-a","state":"working"}]}]}}\n' > "$RESP/2.out"
+  printf '{"ok":true,"result":{"terminal":{"worktreeId":"repo::/scratch","tabId":"tab-a","leafId":"leaf-a","connected":true,"writable":true}}}\n' > "$RESP/3.out"
+  printf '{"ok":true,"result":{"worktrees":[{"worktreeId":"repo::/scratch","agents":[{"paneKey":"tab-a:leaf-a","state":"done"}]}]}}\n' > "$RESP/4.out"
+  printf '{"ok":true,"result":{"terminal":{"worktreeId":"repo::/scratch","tabId":"tab-a","leafId":"leaf-a","connected":true,"writable":true}}}\n' > "$RESP/5.out"
+  printf '{"ok":true,"result":{"worktrees":[{"worktreeId":"repo::/scratch","agents":[{"paneKey":"tab-a:leaf-a","state":"done"}]}]}}\n' > "$RESP/6.out"
   busy=$( PATH="$FB:$PATH" FM_ORCA_LOG="$LOG" FM_ORCA_RESPONSES="$RESP" \
     bash -c '. "$0/bin/fm-backend.sh"; fm_backend_busy_state orca term-recorded repo::/scratch' "$ROOT" )
   alive=$( PATH="$FB:$PATH" FM_ORCA_LOG="$LOG" FM_ORCA_RESPONSES="$RESP" \
-    bash -c '. "$0/bin/fm-backend.sh"; fm_backend_agent_alive orca term-recorded repo::/scratch' "$ROOT" )
-  [ "$busy" = unknown ] || fail "unverified Orca agents snapshot must leave busy state unknown, got '$busy'"
-  [ "$alive" = unknown ] || fail "unverified Orca agents snapshot must leave liveness unknown, got '$alive'"
-  [ ! -s "$LOG" ] || fail "refused semantic mapping must not query or consume worktree ps in production"
-  pass "orca_liveness_baseline_returns_unknown_before_agents_snapshot_is_consumed"
+    bash -c '. "$0/bin/fm-backend.sh"; printf "%s/%s" "$(fm_backend_busy_state orca term-recorded repo::/scratch)" "$(fm_backend_agent_alive orca term-recorded repo::/scratch)"' "$ROOT" )
+  [ "$busy" = busy ] || fail "working agent should report busy, got '$busy'"
+  [ "$alive" = idle/alive ] || fail "turn-complete done agent should report idle/alive, got '$alive'"
+  pass "orca_busy_and_alive_map_only_working_and_turn_complete_done"
 }
 
-orca_agents_snapshot_rejects_ok_false_and_malformed_json_without_liveness_claim() {
-  local busy alive
-  orca_case liveness-invalid-json
-  printf '{"ok":false,"error":{"code":"runtime_unavailable"}}\n' > "$RESP/1.out"
-  printf '{not-json\n' > "$RESP/2.out"
-  busy=$( PATH="$FB:$PATH" FM_ORCA_LOG="$LOG" FM_ORCA_RESPONSES="$RESP" \
-    bash -c '. "$0/bin/fm-backend.sh"; fm_backend_busy_state orca term-recorded repo::/scratch' "$ROOT" )
-  alive=$( PATH="$FB:$PATH" FM_ORCA_LOG="$LOG" FM_ORCA_RESPONSES="$RESP" \
-    bash -c '. "$0/bin/fm-backend.sh"; fm_backend_agent_alive orca term-recorded repo::/scratch' "$ROOT" )
-  [ "$busy" = unknown ] || fail "ok:false fixture must not create an Orca busy claim, got '$busy'"
-  [ "$alive" = unknown ] || fail "malformed fixture must not create an Orca liveness claim, got '$alive'"
-  [ ! -s "$LOG" ] || fail "refused semantic mapping must not query invalid agents snapshots"
-  pass "orca_agents_snapshot_rejects_ok_false_and_malformed_json_without_liveness_claim"
-}
-
-orca_e1_records_exact_worktree_identity_for_scratch_firstmate_task() {
-  local evidence
-  evidence=$(cat "$ROOT/docs/orca-backend.md")
-  assert_contains "$evidence" \
-    'orca_worktree_id=69c04545-e3dd-467f-9b35-0eb698cc41a7::/Users/johncurtis/orca/workspaces/firstmate/fm-orca-e1-runtime-scout-e1' \
-    "E1 evidence must retain the scratch scout's complete recorded worktree identity"
-  assert_contains "$evidence" 'E1 proves exact worktree matching' \
-    "E1 decision must state the exact-worktree result"
-  pass "orca_e1_records_exact_worktree_identity_for_scratch_firstmate_task"
-}
-
-orca_e1_observes_distinct_working_and_idle_agent_states() {
-  local evidence
-  evidence=$(cat "$ROOT/docs/orca-backend.md")
-  assert_contains "$evidence" 'directly observed `working` and `done` agent values' \
-    "E1 evidence must state the agent values actually observed"
-  assert_contains "$evidence" 'It does not prove a stable terminal-to-agent identity relation, `idle`' \
-    "E1 evidence must refuse the named working/idle gate when idle was not observed"
-  pass "orca_e1_observes_distinct_working_and_idle_agent_states: refused because idle was not observed"
-}
-
-orca_e1_plain_shell_or_absent_agent_never_claims_alive() {
+orca_agent_disappearance_after_exit_reports_dead() {
   local alive
-  orca_case liveness-no-agent
-  printf '{"ok":true,"result":{"worktrees":[{"worktreeId":"repo::/scratch","liveTerminalCount":1,"agents":[]}]}}\n' > "$RESP/1.out"
-  alive=$( PATH="$FB:$PATH" FM_ORCA_LOG="$LOG" FM_ORCA_RESPONSES="$RESP" \
-    bash -c '. "$0/bin/fm-backend.sh"; fm_backend_agent_alive orca term-shell repo::/scratch' "$ROOT" )
-  [ "$alive" = unknown ] || fail "unverified plain-shell/no-agent observation must remain unknown, got '$alive'"
-  [ "$alive" != alive ] || fail "plain-shell/no-agent fixture must never claim alive"
-  pass "orca_e1_plain_shell_or_absent_agent_never_claims_alive"
-}
-
-orca_e1_ambiguous_agent_identity_refuses_semantic_mapping() {
-  local busy alive
-  orca_case liveness-ambiguous-agent
-  printf '{"ok":true,"result":{"worktrees":[{"worktreeId":"repo::/scratch","liveTerminalCount":2,"agents":[{"paneKey":"pane:a","state":"working"},{"paneKey":"pane:b","state":"idle"}]}]}}\n' > "$RESP/1.out"
-  busy=$( PATH="$FB:$PATH" FM_ORCA_LOG="$LOG" FM_ORCA_RESPONSES="$RESP" \
-    bash -c '. "$0/bin/fm-backend.sh"; fm_backend_busy_state orca term-recorded repo::/scratch' "$ROOT" )
+  orca_case liveness-exited
+  printf '{"ok":true,"result":{"terminal":{"worktreeId":"repo::/scratch","tabId":"tab-a","leafId":"leaf-a","connected":true,"writable":true}}}\n' > "$RESP/1.out"
+  printf '{"ok":true,"result":{"worktrees":[{"worktreeId":"repo::/scratch","agents":[]}]}}\n' > "$RESP/2.out"
   alive=$( PATH="$FB:$PATH" FM_ORCA_LOG="$LOG" FM_ORCA_RESPONSES="$RESP" \
     bash -c '. "$0/bin/fm-backend.sh"; fm_backend_agent_alive orca term-recorded repo::/scratch' "$ROOT" )
-  [ "$busy" = unknown ] || fail "ambiguous agents must leave busy state unknown, got '$busy'"
-  [ "$alive" = unknown ] || fail "ambiguous agents must leave liveness unknown, got '$alive'"
-  pass "orca_e1_ambiguous_agent_identity_refuses_semantic_mapping"
+  [ "$alive" = dead ] || fail "E1b-proven agent disappearance in a connected writable terminal should report dead, got '$alive'"
+  pass "orca_agent_disappearance_after_exit_reports_dead"
+}
+
+orca_snapshot_rejects_cross_worktree_placeholder_and_duplicates() {
+  local cross placeholder duplicate_worktrees duplicate_agents
+  orca_case liveness-identity-rejections
+  printf '{"ok":true,"result":{"terminal":{"worktreeId":"repo::/other","tabId":"tab-a","leafId":"leaf-a","connected":true,"writable":true}}}\n' > "$RESP/1.out"
+  printf '{"ok":true,"result":{"terminal":{"worktreeId":"repo::/scratch","tabId":"pty:opaque","leafId":"pty:opaque","connected":true,"writable":true}}}\n' > "$RESP/2.out"
+  printf '{"ok":true,"result":{"terminal":{"worktreeId":"repo::/scratch","tabId":"tab-a","leafId":"leaf-a","connected":true,"writable":true}}}\n' > "$RESP/3.out"
+  printf '{"ok":true,"result":{"worktrees":[{"worktreeId":"repo::/scratch","agents":[]},{"worktreeId":"repo::/scratch","agents":[]}]}}\n' > "$RESP/4.out"
+  printf '{"ok":true,"result":{"terminal":{"worktreeId":"repo::/scratch","tabId":"tab-a","leafId":"leaf-a","connected":true,"writable":true}}}\n' > "$RESP/5.out"
+  printf '{"ok":true,"result":{"worktrees":[{"worktreeId":"repo::/scratch","agents":[{"paneKey":"tab-a:leaf-a","state":"working"},{"paneKey":"tab-a:leaf-a","state":"done"}]}]}}\n' > "$RESP/6.out"
+  cross=$( PATH="$FB:$PATH" FM_ORCA_LOG="$LOG" FM_ORCA_RESPONSES="$RESP" \
+    bash -c '. "$0/bin/fm-backend.sh"; fm_backend_agent_alive orca term-recorded repo::/scratch' "$ROOT" )
+  placeholder=$( PATH="$FB:$PATH" FM_ORCA_LOG="$LOG" FM_ORCA_RESPONSES="$RESP" \
+    bash -c '. "$0/bin/fm-backend.sh"; fm_backend_agent_alive orca term-recorded repo::/scratch' "$ROOT" )
+  duplicate_worktrees=$( PATH="$FB:$PATH" FM_ORCA_LOG="$LOG" FM_ORCA_RESPONSES="$RESP" \
+    bash -c '. "$0/bin/fm-backend.sh"; fm_backend_agent_alive orca term-recorded repo::/scratch' "$ROOT" )
+  duplicate_agents=$( PATH="$FB:$PATH" FM_ORCA_LOG="$LOG" FM_ORCA_RESPONSES="$RESP" \
+    bash -c '. "$0/bin/fm-backend.sh"; fm_backend_agent_alive orca term-recorded repo::/scratch' "$ROOT" )
+  [ "$cross/$placeholder/$duplicate_worktrees/$duplicate_agents" = unknown/unknown/unknown/unknown ] \
+    || fail "cross-worktree, placeholder, and duplicate identities must all remain unknown"
+  pass "orca_snapshot_rejects_cross_worktree_placeholder_and_duplicates"
+}
+
+orca_snapshot_rejects_errors_malformed_json_and_unknown_states() {
+  local show_error malformed_show ps_error malformed_ps unknown_state disconnected
+  orca_case liveness-invalid-results
+  printf '{"ok":false,"error":{"code":"terminal_handle_stale"}}\n' > "$RESP/1.out"
+  printf '{not-json\n' > "$RESP/2.out"
+  printf '{"ok":true,"result":{"terminal":{"worktreeId":"repo::/scratch","tabId":"tab-a","leafId":"leaf-a","connected":true,"writable":true}}}\n' > "$RESP/3.out"
+  printf '{"ok":false,"error":{"code":"runtime_unavailable"}}\n' > "$RESP/4.out"
+  printf '{"ok":true,"result":{"terminal":{"worktreeId":"repo::/scratch","tabId":"tab-a","leafId":"leaf-a","connected":true,"writable":true}}}\n' > "$RESP/5.out"
+  printf '{not-json\n' > "$RESP/6.out"
+  printf '{"ok":true,"result":{"terminal":{"worktreeId":"repo::/scratch","tabId":"tab-a","leafId":"leaf-a","connected":true,"writable":true}}}\n' > "$RESP/7.out"
+  printf '{"ok":true,"result":{"worktrees":[{"worktreeId":"repo::/scratch","agents":[{"paneKey":"tab-a:leaf-a","state":"waiting"}]}]}}\n' > "$RESP/8.out"
+  printf '{"ok":true,"result":{"terminal":{"worktreeId":"repo::/scratch","tabId":"tab-a","leafId":"leaf-a","connected":false,"writable":true}}}\n' > "$RESP/9.out"
+  show_error=$( PATH="$FB:$PATH" FM_ORCA_LOG="$LOG" FM_ORCA_RESPONSES="$RESP" bash -c '. "$0/bin/fm-backend.sh"; fm_backend_agent_alive orca term repo::/scratch' "$ROOT" )
+  malformed_show=$( PATH="$FB:$PATH" FM_ORCA_LOG="$LOG" FM_ORCA_RESPONSES="$RESP" bash -c '. "$0/bin/fm-backend.sh"; fm_backend_agent_alive orca term repo::/scratch' "$ROOT" )
+  ps_error=$( PATH="$FB:$PATH" FM_ORCA_LOG="$LOG" FM_ORCA_RESPONSES="$RESP" bash -c '. "$0/bin/fm-backend.sh"; fm_backend_agent_alive orca term repo::/scratch' "$ROOT" )
+  malformed_ps=$( PATH="$FB:$PATH" FM_ORCA_LOG="$LOG" FM_ORCA_RESPONSES="$RESP" bash -c '. "$0/bin/fm-backend.sh"; fm_backend_agent_alive orca term repo::/scratch' "$ROOT" )
+  unknown_state=$( PATH="$FB:$PATH" FM_ORCA_LOG="$LOG" FM_ORCA_RESPONSES="$RESP" bash -c '. "$0/bin/fm-backend.sh"; fm_backend_agent_alive orca term repo::/scratch' "$ROOT" )
+  disconnected=$( PATH="$FB:$PATH" FM_ORCA_LOG="$LOG" FM_ORCA_RESPONSES="$RESP" bash -c '. "$0/bin/fm-backend.sh"; fm_backend_agent_alive orca term repo::/scratch' "$ROOT" )
+  [ "$show_error/$malformed_show/$ps_error/$malformed_ps/$unknown_state/$disconnected" = unknown/unknown/unknown/unknown/unknown/unknown ] \
+    || fail "all error, malformed, unknown-state, and disconnected shapes must remain unknown"
+  pass "orca_snapshot_rejects_errors_malformed_json_and_unknown_states"
+}
+
+non_orca_backend_busy_and_liveness_dispatch_remain_unchanged() {
+  local out
+  out=$(bash -c '
+    . "$0/bin/fm-backend.sh"
+    fm_backend_source() { return 0; }
+    fm_backend_herdr_busy_state() { printf busy; }
+    fm_backend_herdr_agent_alive() { printf alive; }
+    printf "%s/%s/%s/%s/%s" \
+      "$(fm_backend_busy_state herdr session:pane)" \
+      "$(fm_backend_agent_alive herdr session:pane)" \
+      "$(fm_backend_busy_state tmux session:pane)" \
+      "$(fm_backend_busy_state zellij session:pane)" \
+      "$(fm_backend_agent_alive cmux workspace:surface)"
+  ' "$ROOT")
+  [ "$out" = busy/alive/unknown/unknown/unknown ] || fail "non-Orca dispatcher behavior changed: $out"
+  pass "non_orca_backend_busy_and_liveness_dispatch_remain_unchanged"
 }
 
 test_capture_reads_terminal_tail_json
@@ -1372,12 +1406,12 @@ test_remove_worktree_refuses_empty_id
 test_remove_worktree_rejects_orca_error_json
 test_worktree_path_resolves_id
 test_dispatcher_sources_orca_and_routes_primitives
-orca_liveness_baseline_returns_unknown_before_agents_snapshot_is_consumed
-orca_agents_snapshot_rejects_ok_false_and_malformed_json_without_liveness_claim
-orca_e1_records_exact_worktree_identity_for_scratch_firstmate_task
-orca_e1_observes_distinct_working_and_idle_agent_states
-orca_e1_plain_shell_or_absent_agent_never_claims_alive
-orca_e1_ambiguous_agent_identity_refuses_semantic_mapping
+orca_snapshot_selects_only_recorded_worktree_and_matching_agent
+orca_busy_and_alive_map_only_working_and_turn_complete_done
+orca_agent_disappearance_after_exit_reports_dead
+orca_snapshot_rejects_cross_worktree_placeholder_and_duplicates
+orca_snapshot_rejects_errors_malformed_json_and_unknown_states
+non_orca_backend_busy_and_liveness_dispatch_remain_unchanged
 test_json_get_ignores_undocumented_terminal_id_shapes
 test_worktree_and_terminal_helpers_parse_json
 test_worktree_create_removes_worktree_when_path_missing

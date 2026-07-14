@@ -602,18 +602,19 @@ fm_backend_worktree_path() {  # <backend> <worktree-id>
 }
 
 # fm_backend_busy_state: semantic busy/idle/unknown for backends that expose
-# native agent-state (herdr-addendum "busy state" row - the first backend
-# where this gets real semantics beyond pane-regex). Backends with no such
-# primitive (tmux) report unknown. Callers own the fallback policy: fm-watch.sh
+# native agent-state. Orca additionally requires the recorded worktree id as
+# its third argument so its runtime-global inventory stays scoped to the task.
+# Backends with no such primitive (tmux) report unknown. Callers own the fallback policy: fm-watch.sh
 # uses unknown as the cue for its pane-hash + FM_BUSY_REGEX detection, while
 # fm-crew-state.sh also corroborates native idle verdicts before treating a
 # no-run crew as not busy.
-fm_backend_busy_state() {  # <backend> <target>
+fm_backend_busy_state() {  # <backend> <target> [recorded-worktree-id]
   local backend=$1
   shift
   fm_backend_source "$backend" || { printf 'unknown'; return 0; }
   case "$backend" in
     herdr) fm_backend_herdr_busy_state "$@" ;;
+    orca) fm_backend_orca_busy_state "$@" ;;
     *) printf 'unknown' ;;
   esac
 }
@@ -705,22 +706,23 @@ fm_backend_target_exists() {  # <backend> <target> [expected-label]
 #   dead    - CONFIDENTLY not an agent: a bare shell (tmux) or a
 #             structurally-gone/no-agent-registered pane (herdr).
 #   unknown - anything ambiguous, unreadable, or unverified for this backend.
-# Scoped to today's --secondmate-spawn-capable backends with an empirically
-# verified classifier: tmux (docs/tmux-backend.md "Agent liveness probe") and
-# herdr (docs/herdr-backend.md "Agent liveness probe reuses the husk
-# classifier"). zellij, orca, and cmux report unknown until independently
-# verified - future work, not a functional gap for the two backends
+# Scoped to backends with an empirically verified classifier: tmux
+# (docs/tmux-backend.md "Agent liveness probe"), herdr
+# (docs/herdr-backend.md "Agent liveness probe reuses the husk classifier"),
+# and Orca (docs/orca-backend.md "Semantic liveness"). zellij and cmux report
+# unknown until independently verified - not a functional gap for the two backends
 # --secondmate spawns actually support today plus tmux's reference path.
 # Callers must treat unknown exactly like an unreadable target: NEVER license
 # an action from it alone - the secondmate-liveness sweep gates a respawn on
 # `dead` only, precisely so a momentary read glitch can never duplicate a
 # live supervisor.
-fm_backend_agent_alive() {  # <backend> <target>
-  local backend=$1 target=$2
+fm_backend_agent_alive() {  # <backend> <target> [recorded-worktree-id]
+  local backend=$1 target=$2 worktree_id=${3:-}
   fm_backend_source "$backend" || { printf 'unknown'; return 0; }
   case "$backend" in
     tmux) fm_backend_tmux_agent_alive "$target" ;;
     herdr) fm_backend_herdr_agent_alive "$target" ;;
+    orca) fm_backend_orca_agent_alive "$target" "$worktree_id" ;;
     *) printf 'unknown' ;;
   esac
 }

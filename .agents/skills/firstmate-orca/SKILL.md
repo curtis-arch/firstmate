@@ -57,6 +57,8 @@ Put long instructions in the task brief or a temporary file and point the crewma
 When supervising, treat `state/<id>.meta` as the routing record and Orca's own ids as backend implementation details.
 The stable firstmate alias is `fm-<id>`.
 The recorded `terminal=` and `orca_worktree_id=` fields are what backend helpers use under the hood.
+Semantic liveness is exact and fail-closed: the helpers join the recorded worktree and `terminal show` pane identity to one agent, while unknown or ambiguous results retain the existing fallback policy.
+Do not infer agent state from Orca's aggregate worktree status or select the first agent in a worktree.
 
 If `fm-send` fails to submit, do not immediately repeat the same long instruction.
 Peek first, then decide whether the target is busy, waiting on a prompt, stuck behind a popup, or genuinely wedged.

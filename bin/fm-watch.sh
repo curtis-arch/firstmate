@@ -180,8 +180,15 @@ hash_pane() {
 # already read for hashing, so this adds no extra backend calls on the
 # regex-fallback path.
 window_is_busy() {  # <window> <tail40>
-  local w=$1 tail40=$2 bs
-  bs=$(fm_backend_busy_state "$(window_backend "$w")" "$w" 2>/dev/null)
+  local w=$1 tail40=$2 bs backend meta worktree_id
+  backend=$(window_backend "$w")
+  if [ "$backend" = orca ]; then
+    meta=$(fm_backend_meta_for_window "$w" "$STATE" 2>/dev/null || true)
+    worktree_id=$(fm_meta_get "$meta" orca_worktree_id)
+    bs=$(fm_backend_busy_state orca "$w" "$worktree_id" 2>/dev/null)
+  else
+    bs=$(fm_backend_busy_state "$backend" "$w" 2>/dev/null)
+  fi
   case "$bs" in
     busy) return 0 ;;
     idle) return 1 ;;
