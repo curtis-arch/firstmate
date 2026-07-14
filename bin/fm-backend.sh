@@ -375,7 +375,18 @@ fm_backend_meta_for_window() {  # <target> <state-dir>
 }
 
 fm_backend_orca_meta_for_target() {  # <terminal-handle>
-  fm_backend_meta_for_window "$1" "$FM_BACKEND_STATE_DIR" 2>/dev/null || true
+  local target=$1 meta backend terminal match= count=0
+  for meta in "$FM_BACKEND_STATE_DIR"/*.meta; do
+    [ -e "$meta" ] || continue
+    backend=$(fm_meta_get "$meta" backend)
+    [ "$backend" = orca ] || continue
+    terminal=$(fm_meta_get "$meta" terminal)
+    [ -n "$terminal" ] && [ "$terminal" = "$target" ] || continue
+    match=$meta
+    count=$((count + 1))
+  done
+  [ "$count" -eq 1 ] || return 1
+  printf '%s' "$match"
 }
 
 fm_backend_task_id_for_selector() {  # <raw-target> <state-dir>
@@ -532,7 +543,7 @@ fm_backend_capture() {  # <backend> <target> <lines> [expected-label]
     herdr) fm_backend_herdr_capture "$@" ;;
     zellij) fm_backend_zellij_capture "$@" ;;
     orca)
-      meta=$(fm_backend_orca_meta_for_target "$1")
+      meta=$(fm_backend_orca_meta_for_target "$1" 2>/dev/null || true)
       fm_backend_orca_capture "$1" "${2:-40}" "$meta"
       ;;
     cmux) fm_backend_cmux_capture "$@" ;;
@@ -550,7 +561,7 @@ fm_backend_send_key() {  # <backend> <target> <key> [expected-label]
     herdr) fm_backend_herdr_send_key "$@" ;;
     zellij) fm_backend_zellij_send_key "$@" ;;
     orca)
-      meta=$(fm_backend_orca_meta_for_target "$1")
+      meta=$(fm_backend_orca_meta_for_target "$1" 2>/dev/null || true)
       fm_backend_orca_send_key "$1" "$2" "$meta"
       ;;
     cmux) fm_backend_cmux_send_key "$@" ;;
@@ -570,7 +581,7 @@ fm_backend_send_text_submit() {  # <backend> <target> <text> <retries> <enter-sl
     herdr) fm_backend_herdr_send_text_submit "$@" ;;
     zellij) fm_backend_zellij_send_text_submit "$@" ;;
     orca)
-      meta=$(fm_backend_orca_meta_for_target "$1")
+      meta=$(fm_backend_orca_meta_for_target "$1" 2>/dev/null || true)
       fm_backend_orca_send_text_submit "$1" "$2" "$3" "$4" "$5" "$meta"
       ;;
     cmux) fm_backend_cmux_send_text_submit "$@" ;;
@@ -590,7 +601,7 @@ fm_backend_kill() {  # <backend> <target>
     herdr) fm_backend_herdr_kill "$@" ;;
     zellij) fm_backend_zellij_kill "$@" ;;
     orca)
-      meta=$(fm_backend_orca_meta_for_target "$1")
+      meta=$(fm_backend_orca_meta_for_target "$1" 2>/dev/null || true)
       fm_backend_orca_kill "$1" "$meta"
       ;;
     cmux) fm_backend_cmux_kill "$@" ;;
@@ -632,7 +643,7 @@ fm_backend_busy_state() {  # <backend> <target> [recorded-worktree-id]
   case "$backend" in
     herdr) fm_backend_herdr_busy_state "$@" ;;
     orca)
-      meta=$(fm_backend_orca_meta_for_target "$1")
+      meta=$(fm_backend_orca_meta_for_target "$1" 2>/dev/null || true)
       fm_backend_orca_busy_state "$@" "$meta"
       ;;
     *) printf 'unknown' ;;
@@ -659,7 +670,7 @@ fm_backend_composer_state() {  # <backend> <target> -> empty|pending|unknown
     tmux) fm_tmux_composer_state "$@" ;;
     herdr) fm_backend_herdr_composer_state "$@" ;;
     orca)
-      meta=$(fm_backend_orca_meta_for_target "$1")
+      meta=$(fm_backend_orca_meta_for_target "$1" 2>/dev/null || true)
       fm_backend_orca_composer_state "$1" "$meta"
       ;;
     cmux) fm_backend_cmux_composer_state "$@" ;;
@@ -746,7 +757,7 @@ fm_backend_agent_alive() {  # <backend> <target> [recorded-worktree-id]
     tmux) fm_backend_tmux_agent_alive "$target" ;;
     herdr) fm_backend_herdr_agent_alive "$target" ;;
     orca)
-      meta=$(fm_backend_orca_meta_for_target "$target")
+      meta=$(fm_backend_orca_meta_for_target "$target" 2>/dev/null || true)
       fm_backend_orca_agent_alive "$target" "$worktree_id" "$meta"
       ;;
     *) printf 'unknown' ;;

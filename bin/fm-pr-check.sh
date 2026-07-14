@@ -21,6 +21,7 @@ EXPECTED_IDENTITY=$(fm_meta_identity "$META") || {
   echo "error: no live metadata for task $ID at $META" >&2
   exit 1
 }
+EXPECTED_GENERATION=$(printf '%s\n' "$EXPECTED_IDENTITY" | sed -n 's/^generation=//p')
 WT=$(grep '^worktree=' "$META" | tail -1 | cut -d= -f2- || true)
 PR_HEAD=
 if [ -n "$WT" ] && [ -d "$WT" ]; then
@@ -33,7 +34,10 @@ fi
 META_STATUS=0
 fm_meta_lock_acquire "$META" || exit 1
 CURRENT_IDENTITY=$(fm_meta_identity_unlocked "$META" 2>/dev/null || true)
-if [ -z "$CURRENT_IDENTITY" ] || [ "$CURRENT_IDENTITY" != "$EXPECTED_IDENTITY" ] || ! fm_meta_is_active_unlocked "$META"; then
+CURRENT_GENERATION=$(fm_meta_value_unlocked "$META" generation 2>/dev/null || true)
+if [ -z "$CURRENT_IDENTITY" ] || ! fm_meta_is_active_unlocked "$META" \
+  || { [ -n "$EXPECTED_GENERATION" ] && [ "$CURRENT_GENERATION" != "$EXPECTED_GENERATION" ]; } \
+  || { [ -z "$EXPECTED_GENERATION" ] && [ "$CURRENT_IDENTITY" != "$EXPECTED_IDENTITY" ]; }; then
   META_STATUS=1
 else
   if ! grep -qxF "pr=$URL" "$META"; then

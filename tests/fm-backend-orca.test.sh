@@ -65,11 +65,27 @@ add_tmux_fake() {
 #!/usr/bin/env bash
 set -u
 LOG="${FM_ORCA_LOG:?}"
+KILLED="$LOG.tmux-killed"
 {
   printf 'tmux'
   for a in "$@"; do printf '\x1f%s' "$a"; done
   printf '\n'
 } >> "$LOG"
+if [ "${1:-}" = kill-window ]; then
+  target=
+  while [ "$#" -gt 0 ]; do
+    if [ "$1" = -t ]; then shift; target=${1:-}; break; fi
+    shift
+  done
+  [ -z "$target" ] || printf '%s\n' "$target" >> "$KILLED"
+elif [ "${1:-}" = display-message ]; then
+  target=
+  while [ "$#" -gt 0 ]; do
+    if [ "$1" = -t ]; then shift; target=${1:-}; break; fi
+    shift
+  done
+  if [ -n "$target" ] && grep -qxF "$target" "$KILLED" 2>/dev/null; then exit 1; fi
+fi
 exit 0
 SH
   chmod +x "$fb/tmux"
@@ -1840,6 +1856,122 @@ non_orca_backend_busy_and_liveness_dispatch_remain_unchanged() {
   pass "non_orca_backend_busy_and_liveness_dispatch_remain_unchanged"
 }
 
+orca_target_metadata_lookup_requires_one_exact_record() {
+  local state out status
+  state="$TMP_ROOT/orca-meta-lookup"
+  mkdir -p "$state"
+  fm_write_meta "$state/cross.meta" "backend=tmux" "window=term-shared" "terminal=term-shared"
+  fm_write_meta "$state/window-only.meta" "backend=orca" "window=term-shared" "terminal=term-other"
+  fm_write_meta "$state/exact.meta" "backend=orca" "window=fm-exact" "terminal=term-shared"
+  out=$(FM_STATE_OVERRIDE="$state" bash -c '. "$0/bin/fm-backend.sh"; fm_backend_orca_meta_for_target term-shared' "$ROOT")
+  [ "$out" = "$state/exact.meta" ] || fail "Orca lookup accepted a window or cross-backend collision: $out"
+  fm_write_meta "$state/duplicate.meta" "backend=orca" "window=fm-duplicate" "terminal=term-shared"
+  if FM_STATE_OVERRIDE="$state" bash -c '. "$0/bin/fm-backend.sh"; fm_backend_orca_meta_for_target term-shared' "$ROOT" >/dev/null; then
+    status=0
+  else
+    status=$?
+  fi
+  [ "$status" -ne 0 ] || fail "Orca lookup accepted duplicate exact terminal records"
+  pass "Orca metadata lookup requires one exact backend terminal record"
+}
+
+metadata_generation_validates_uuidgen_output() {
+  local fake value
+  fake="$TMP_ROOT/invalid-uuidgen"
+  mkdir -p "$fake"
+  cat > "$fake/uuidgen" <<'SH'
+#!/usr/bin/env bash
+exit 0
+SH
+  chmod +x "$fake/uuidgen"
+  value=$(PATH="$fake:$PATH" bash -c '. "$0/bin/fm-meta-lib.sh"; fm_meta_new_generation' "$ROOT") || fail "generation fallback failed"
+  printf '%s\n' "$value" | grep -Eq '^[0-9a-f]{32}$' || fail "generation accepted empty uuidgen output: $value"
+  pass "metadata generation rejects empty uuidgen output"
+}
+
+teardown_ownership_requires_explicit_dead_owner_resume() {
+  local state meta identity owner token claimed resumed status
+  state="$TMP_ROOT/teardown-resume"
+  meta="$state/task.meta"
+  mkdir -p "$state"
+  fm_write_meta "$meta" "generation=task-one" "kind=scout" "window=fm-task"
+  identity=$(bash -c '. "$0/bin/fm-meta-lib.sh"; fm_meta_identity "$1"' "$ROOT" "$meta")
+  owner=$(bash -c '. "$0/bin/fm-meta-lib.sh"; fm_meta_teardown_owner' "$ROOT")
+  token=${owner%%:*}
+  claimed=$(bash -c '. "$0/bin/fm-meta-lib.sh"; fm_meta_claim_teardown "$1" "$2" "$3"' "$ROOT" "$meta" "$identity" "$owner") || fail "initial teardown claim failed"
+  if bash -c '. "$0/bin/fm-meta-lib.sh"; next=$(fm_meta_teardown_owner wrong); fm_meta_claim_teardown "$1" "$2" "$next" wrong' \
+    "$ROOT" "$meta" "$claimed" >/dev/null; then status=0; else status=$?; fi
+  [ "$status" -ne 0 ] || fail "teardown ownership resumed with the wrong token"
+  resumed=$(bash -c '. "$0/bin/fm-meta-lib.sh"; next=$(fm_meta_teardown_owner "$3"); fm_meta_claim_teardown "$1" "$2" "$next" "$3"' \
+    "$ROOT" "$meta" "$claimed" "$token") || fail "dead teardown owner could not be explicitly resumed"
+  assert_contains "$resumed" "lifecycle=teardown:$token:" "resumed teardown did not preserve its owner token"
+
+  fm_write_meta "$meta" "generation=task-two" "kind=scout" "window=fm-task"
+  if bash -c '
+    . "$0/bin/fm-meta-lib.sh"
+    identity=$(fm_meta_identity "$1")
+    owner=$(fm_meta_teardown_owner live)
+    claimed=$(fm_meta_claim_teardown "$1" "$identity" "$owner")
+    next=$(fm_meta_teardown_owner live)
+    fm_meta_claim_teardown "$1" "$claimed" "$next" live
+  ' "$ROOT" "$meta" >/dev/null; then status=0; else status=$?; fi
+  [ "$status" -ne 0 ] || fail "teardown ownership took over a live owner"
+  pass "teardown ownership resumes only explicit dead owners"
+}
+
+forced_secondmate_cleanup_claims_all_children_before_kill() {
+  local home subhome state fake neutral out status
+  home="$TMP_ROOT/claimed-children-home"
+  subhome="$TMP_ROOT/claimed-children-secondmate"
+  state="$home/state"
+  fake="$TMP_ROOT/claimed-children-fake"
+  mkdir -p "$state" "$home/data" "$subhome/bin" "$subhome/data" "$subhome/state" "$subhome/config" "$subhome/projects" "$fake"
+  printf 'parent\n' > "$subhome/.fm-secondmate-home"
+  printf '# Firstmate\n' > "$subhome/AGENTS.md"
+  fm_write_meta "$state/parent.meta" "generation=parent-generation" "window=firstmate:fm-parent" \
+    "worktree=$subhome" "project=$subhome" "kind=secondmate" "mode=secondmate" "home=$subhome"
+  fm_write_meta "$subhome/state/child-a.meta" "generation=child-a-generation" "window=firstmate:fm-child-a" "kind=scout"
+  fm_write_meta "$subhome/state/child-b.meta" "generation=child-b-generation" "window=firstmate:fm-child-b" "kind=scout"
+  cat > "$fake/tmux" <<'SH'
+#!/usr/bin/env bash
+set -u
+case "${1:-}" in
+  kill-window)
+    case "${3:-}" in
+      firstmate:fm-parent) : > "$FM_TEST_PARENT_KILLED" ;;
+      firstmate:fm-child-*)
+        if grep -q '^lifecycle=teardown:' "$FM_TEST_CHILD_A" && grep -q '^lifecycle=teardown:' "$FM_TEST_CHILD_B"; then
+          : > "$FM_TEST_ALL_CHILDREN_CLAIMED"
+        fi
+        if [ -f "$FM_TEST_ALL_CHILDREN_CLAIMED" ]; then
+          printf '%s\n' "${3:-}" >> "$FM_TEST_CHILD_KILLS"
+        fi
+        ;;
+    esac
+    ;;
+  display-message)
+    [ ! -f "$FM_TEST_PARENT_KILLED" ]
+    ;;
+esac
+SH
+  chmod +x "$fake/tmux"
+  neutral=$(neutral_fm_root "$TMP_ROOT/claimed-children-neutral")
+  set +e
+  out=$(PATH="$fake:$PATH" FM_ROOT_OVERRIDE="$neutral" FM_HOME="$home" \
+    FM_TEST_PARENT_KILLED="$TMP_ROOT/claimed-parent-killed" \
+    FM_TEST_ALL_CHILDREN_CLAIMED="$TMP_ROOT/claimed-all-children" \
+    FM_TEST_CHILD_A="$subhome/state/child-a.meta" FM_TEST_CHILD_B="$subhome/state/child-b.meta" \
+    FM_TEST_CHILD_KILLS="$TMP_ROOT/claimed-child-kills" \
+    "$ROOT/bin/fm-teardown.sh" parent --force 2>&1)
+  status=$?
+  set -e
+  expect_code 0 "$status" "forced secondmate teardown should succeed after claiming children"$'\n'"$out"
+  assert_present "$TMP_ROOT/claimed-parent-killed" "forced cleanup did not quiesce the parent first"
+  assert_grep 'firstmate:fm-child-a' "$TMP_ROOT/claimed-child-kills" "child A was killed before every child was claimed"
+  assert_grep 'firstmate:fm-child-b' "$TMP_ROOT/claimed-child-kills" "child B was killed before every child was claimed"
+  pass "forced secondmate cleanup quiesces parent and claims every child"
+}
+
 test_capture_reads_terminal_tail_json
 test_capture_falls_back_to_text_fields
 test_capture_fails_on_orca_error_json
@@ -1881,6 +2013,10 @@ orca_agent_disappearance_after_exit_reports_dead
 orca_snapshot_rejects_cross_worktree_placeholder_and_duplicates
 orca_snapshot_rejects_errors_malformed_json_and_unknown_states
 non_orca_backend_busy_and_liveness_dispatch_remain_unchanged
+orca_target_metadata_lookup_requires_one_exact_record
+metadata_generation_validates_uuidgen_output
+teardown_ownership_requires_explicit_dead_owner_resume
+forced_secondmate_cleanup_claims_all_children_before_kill
 test_json_get_ignores_undocumented_terminal_id_shapes
 test_worktree_and_terminal_helpers_parse_json
 test_worktree_create_removes_worktree_when_path_missing

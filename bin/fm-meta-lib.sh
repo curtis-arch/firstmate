@@ -41,12 +41,49 @@ fm_meta_is_active_unlocked() {  # <meta-path>
 fm_meta_new_generation() {
   local value
   if command -v uuidgen >/dev/null 2>&1; then
-    uuidgen | tr '[:upper:]' '[:lower:]'
-    return
+    if value=$(uuidgen 2>/dev/null); then
+      value=$(printf '%s' "$value" | tr '[:upper:]' '[:lower:]')
+      if printf '%s\n' "$value" | grep -Eq '^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$'; then
+        printf '%s\n' "$value"
+        return 0
+      fi
+    fi
   fi
   value=$(od -An -N16 -tx1 /dev/urandom 2>/dev/null | tr -d ' \n') || return 1
-  [ "${#value}" -eq 32 ] || return 1
+  printf '%s\n' "$value" | grep -Eq '^[0-9a-f]{32}$' || return 1
   printf '%s\n' "$value"
+}
+
+fm_meta_process_stamp() {  # <pid>
+  local stamp
+  stamp=$(ps -p "$1" -o lstart= 2>/dev/null | tr -cd '[:alnum:]') || return 1
+  [ -n "$stamp" ] || return 1
+  printf '%s' "$stamp"
+}
+
+fm_meta_teardown_owner() {  # [token]
+  local token=${1:-} stamp
+  [ -n "$token" ] || token=$(fm_meta_new_generation) || return 1
+  stamp=$(fm_meta_process_stamp "$$") || return 1
+  printf '%s:%s:%s' "$token" "$$" "$stamp"
+}
+
+fm_meta_teardown_owner_live() {  # <owner>
+  local owner=$1 rest pid expected_stamp current_stamp
+  rest=${owner#*:}
+  [ "$rest" != "$owner" ] || return 0
+  pid=${rest%%:*}
+  expected_stamp=${rest#*:}
+  [ "$expected_stamp" != "$rest" ] || return 0
+  case "$pid" in ''|*[!0-9]*) return 0 ;; esac
+  [ -n "$expected_stamp" ] || return 0
+  if kill -0 "$pid" 2>/dev/null; then
+    current_stamp=$(fm_meta_process_stamp "$pid" 2>/dev/null || true)
+    [ -z "$current_stamp" ] && return 0
+    [ "$current_stamp" = "$expected_stamp" ]
+    return
+  fi
+  return 1
 }
 
 fm_meta_ensure_generation() {  # <meta-path>
@@ -74,12 +111,22 @@ fm_meta_ensure_generation() {  # <meta-path>
   printf '%s' "$generation"
 }
 
-fm_meta_claim_teardown() {  # <meta-path> <expected-identity> <owner>
-  local meta=$1 expected=$2 owner=$3 current tmp claimed status=0
+fm_meta_claim_teardown() {  # <meta-path> <expected-identity> <owner> [resume-token]
+  local meta=$1 expected=$2 owner=$3 resume_token=${4:-} current lifecycle existing_owner existing_token tmp claimed status=0
   fm_meta_lock_acquire "$meta" || return 1
   current=$(fm_meta_identity_unlocked "$meta") || status=$?
-  if [ "$status" -eq 0 ] && { [ "$current" != "$expected" ] || ! fm_meta_is_active_unlocked "$meta"; }; then
+  lifecycle=$(fm_meta_value_unlocked "$meta" lifecycle 2>/dev/null || true)
+  if [ "$status" -eq 0 ] && [ "$current" != "$expected" ]; then
     status=1
+  elif [ "$status" -eq 0 ] && [ -n "$lifecycle" ]; then
+    case "$lifecycle" in
+      teardown:*) existing_owner=${lifecycle#teardown:} ;;
+      *) status=1 ;;
+    esac
+    existing_token=${existing_owner%%:*}
+    if [ "$status" -eq 0 ] && { [ -z "$resume_token" ] || [ "$resume_token" != "$existing_token" ] || fm_meta_teardown_owner_live "$existing_owner"; }; then
+      status=1
+    fi
   fi
   tmp="$meta.tmp.$$"
   if [ "$status" -eq 0 ]; then

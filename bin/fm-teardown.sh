@@ -38,7 +38,7 @@
 # leased home releases its durable treehouse lease so the pool slot is freed,
 # never left leased forever. If the treehouse return fails, teardown leaves the
 # leased home and state in place instead of hiding a still-held lease.
-# Usage: fm-teardown.sh <task-id> [--force]
+# Usage: fm-teardown.sh <task-id> [--force] [--resume <owner-token>]
 #   --force skips ordinary-task dirty and landed-work checks, skips scout report
 #   checks, and discards secondmate child work for kind=secondmate. Only use it
 #   when the captain has explicitly said to discard the work.
@@ -98,13 +98,28 @@ fm_refuse_if_gate_agent
 FM_LOCK_LOG_PREFIX=teardown
 "$FM_ROOT/bin/fm-guard.sh" || true
 ID=$1
-FORCE=${2:-}
+shift
+FORCE=
+TEARDOWN_RESUME_TOKEN=
+while [ "$#" -gt 0 ]; do
+  case "$1" in
+    --force) FORCE=--force ;;
+    --resume)
+      shift
+      [ "$#" -gt 0 ] || { echo "error: --resume requires an owner token" >&2; exit 1; }
+      TEARDOWN_RESUME_TOKEN=$1
+      ;;
+    *) echo "error: unknown teardown option: $1" >&2; exit 1 ;;
+  esac
+  shift
+done
 
 META="$STATE/$ID.meta"
 [ -f "$META" ] || { echo "error: no meta for task $ID at $META" >&2; exit 1; }
 META_IDENTITY=$(fm_meta_identity "$META") || { echo "error: could not capture task identity from $META" >&2; exit 1; }
 TEARDOWN_OWNER=
 TEARDOWN_IDENTITY=
+PARENT_ENDPOINT_QUIESCED=0
 
 release_teardown_claim() {
   [ -z "$TEARDOWN_OWNER" ] || fm_meta_release_teardown "$META" "$TEARDOWN_OWNER" 2>/dev/null || true
@@ -868,74 +883,99 @@ validate_firstmate_home_children_removal() {
   done
 }
 
+cleanup_claimed_firstmate_child() {
+  local home=$1 child_meta=$2 child_identity=$3 sub_state child_id child_t child_wt child_proj child_kind child_home child_backend child_orca_worktree_id child_return_rc
+  sub_state="$home/state"
+  child_id=$(basename "$child_meta" .meta)
+  child_wt=$(meta_value "$child_meta" worktree)
+  child_proj=$(meta_value "$child_meta" project)
+  child_kind=$(meta_value "$child_meta" kind)
+  [ -n "$child_kind" ] || child_kind=ship
+  child_backend=$(fm_backend_of_meta "$child_meta")
+  if [ "$child_backend" = orca ]; then
+    child_t=$(meta_value "$child_meta" terminal)
+  else
+    child_t=$(fm_backend_target_of_meta "$child_meta")
+  fi
+  if [ "$child_backend" = orca ] && [ "$child_kind" != secondmate ]; then
+    child_orca_worktree_id=$(require_orca_worktree_id "$child_meta") || return 1
+    if [ -n "$child_wt" ] && [ -e "$child_wt" ]; then
+      validate_child_worktree_for_removal "$child_wt" "$child_proj" >/dev/null || return 1
+    fi
+  fi
+  if [ -n "$child_t" ]; then
+    if [ "$child_backend" = zellij ]; then
+      ( unset FM_ROOT_OVERRIDE; FM_HOME=$home FM_ROOT=$home fm_backend_kill "$child_backend" "$child_t" "$(meta_value "$child_meta" zellij_tab_id)" "fm-$child_id" ) 2>/dev/null || true
+    else
+      fm_backend_kill "$child_backend" "$child_t" "$(meta_value "$child_meta" zellij_tab_id)" "fm-$child_id" 2>/dev/null || true
+    fi
+  fi
+  if [ "$child_kind" = secondmate ]; then
+    child_home=$(meta_value "$child_meta" home)
+    [ -n "$child_home" ] || child_home=$child_wt
+    if [ -n "$child_home" ] && [ -d "$child_home" ]; then
+      if [ -n "$child_t" ] && fm_backend_target_exists "$child_backend" "$child_t" "fm-$child_id" 2>/dev/null; then
+        return 1
+      fi
+      validate_firstmate_home_children_removal "$child_home" || return 1
+      cleanup_firstmate_home_children "$child_home" || return 1
+      remove_firstmate_home "$child_home" "child firstmate home" "$child_id" || return 1
+    fi
+  elif [ "$child_backend" = orca ]; then
+    if [ -n "$child_wt" ] && [ -d "$child_wt" ]; then
+      validate_child_worktree_for_removal "$child_wt" "$child_proj" >/dev/null || return 1
+      rm -f "$child_wt/.claude/settings.local.json" "$child_wt/.opencode/plugins/fm-turn-end.js" "$child_wt/.fm-grok-turnend"
+    fi
+    fm_backend_remove_worktree "$child_backend" "$child_orca_worktree_id" || return 1
+  elif [ -n "$child_wt" ] && [ -d "$child_wt" ]; then
+    validate_child_worktree_for_removal "$child_wt" "$child_proj" >/dev/null || return 1
+    rm -f "$child_wt/.claude/settings.local.json" "$child_wt/.opencode/plugins/fm-turn-end.js" "$child_wt/.fm-grok-turnend"
+    if [ -n "$child_proj" ] && [ -d "$child_proj" ] && command -v treehouse >/dev/null 2>&1; then
+      if teardown_treehouse_return "$child_wt" "$child_proj" "child worktree"; then
+        :
+      else
+        child_return_rc=$?
+        if [ "$child_return_rc" -eq "$TEARDOWN_TREEHOUSE_LOCK_REFUSED" ]; then
+          return "$child_return_rc"
+        fi
+        safe_rm_rf_child_worktree "$child_wt" "$child_proj"
+      fi
+    else
+      safe_rm_rf_child_worktree "$child_wt" "$child_proj"
+    fi
+  fi
+  remove_grok_turnend_auth "$sub_state" "$child_id"
+  fm_meta_remove_if_identity "$child_meta" "$child_identity" \
+    "$sub_state/$child_id.status" "$sub_state/$child_id.turn-ended" "$sub_state/$child_id.check.sh" \
+    "$sub_state/$child_id.pi-ext.ts" "$sub_state/$child_id.grok-turnend-token"
+}
+
 cleanup_firstmate_home_children() {
-  local home=$1 sub_state child_meta child_identity child_id child_t child_wt child_proj child_kind child_home child_backend child_orca_worktree_id child_return_rc
+  local home=$1 sub_state child_meta child_identity child_claim status=0 i
+  local -a child_metas=() child_claims=()
   sub_state="$home/state"
   [ -d "$sub_state" ] || return 0
   for child_meta in "$sub_state"/*.meta; do
     [ -e "$child_meta" ] || continue
-    child_identity=$(fm_meta_identity "$child_meta") || return 1
-    child_id=$(basename "$child_meta" .meta)
-    child_wt=$(meta_value "$child_meta" worktree)
-    child_proj=$(meta_value "$child_meta" project)
-    child_kind=$(meta_value "$child_meta" kind)
-    [ -n "$child_kind" ] || child_kind=ship
-    child_backend=$(fm_backend_of_meta "$child_meta")
-    if [ "$child_backend" = orca ]; then
-      child_t=$(meta_value "$child_meta" terminal)
-    else
-      child_t=$(fm_backend_target_of_meta "$child_meta")
-    fi
-    if [ "$child_backend" = orca ] && [ "$child_kind" != secondmate ]; then
-      child_orca_worktree_id=$(require_orca_worktree_id "$child_meta") || return 1
-      if [ -n "$child_wt" ] && [ -e "$child_wt" ]; then
-        validate_child_worktree_for_removal "$child_wt" "$child_proj" >/dev/null || return 1
-      fi
-    fi
-    if [ -n "$child_t" ]; then
-      if [ "$child_backend" = zellij ]; then
-        # Zellij titles are scoped by the owning home tag, so forced secondmate
-        # cleanup must verify child tabs as that child home, not the parent.
-        ( unset FM_ROOT_OVERRIDE; FM_HOME=$home FM_ROOT=$home fm_backend_kill "$child_backend" "$child_t" "$(meta_value "$child_meta" zellij_tab_id)" "fm-$child_id" ) 2>/dev/null || true
-      else
-        fm_backend_kill "$child_backend" "$child_t" "$(meta_value "$child_meta" zellij_tab_id)" "fm-$child_id" 2>/dev/null || true
-      fi
-    fi
-    if [ "$child_kind" = secondmate ]; then
-      child_home=$(meta_value "$child_meta" home)
-      [ -n "$child_home" ] || child_home=$child_wt
-      if [ -n "$child_home" ] && [ -d "$child_home" ]; then
-        cleanup_firstmate_home_children "$child_home"
-        remove_firstmate_home "$child_home" "child firstmate home" "$child_id"
-      fi
-    elif [ "$child_backend" = orca ]; then
-      if [ -n "$child_wt" ] && [ -d "$child_wt" ]; then
-        validate_child_worktree_for_removal "$child_wt" "$child_proj" >/dev/null || return 1
-        rm -f "$child_wt/.claude/settings.local.json" "$child_wt/.opencode/plugins/fm-turn-end.js" "$child_wt/.fm-grok-turnend"
-      fi
-      fm_backend_remove_worktree "$child_backend" "$child_orca_worktree_id" || return 1
-    elif [ -n "$child_wt" ] && [ -d "$child_wt" ]; then
-      validate_child_worktree_for_removal "$child_wt" "$child_proj" >/dev/null || return 1
-      rm -f "$child_wt/.claude/settings.local.json" "$child_wt/.opencode/plugins/fm-turn-end.js" "$child_wt/.fm-grok-turnend"
-      if [ -n "$child_proj" ] && [ -d "$child_proj" ] && command -v treehouse >/dev/null 2>&1; then
-        if teardown_treehouse_return "$child_wt" "$child_proj" "child worktree"; then
-          :
-        else
-          child_return_rc=$?
-          if [ "$child_return_rc" -eq "$TEARDOWN_TREEHOUSE_LOCK_REFUSED" ]; then
-            return "$child_return_rc"
-          fi
-          safe_rm_rf_child_worktree "$child_wt" "$child_proj"
-        fi
-      else
-        safe_rm_rf_child_worktree "$child_wt" "$child_proj"
-      fi
-    fi
-    remove_grok_turnend_auth "$sub_state" "$child_id"
-    fm_meta_remove_if_identity "$sub_state/$child_id.meta" "$child_identity" \
-      "$sub_state/$child_id.status" "$sub_state/$child_id.turn-ended" "$sub_state/$child_id.check.sh" \
-      "$sub_state/$child_id.pi-ext.ts" "$sub_state/$child_id.grok-turnend-token" || return 1
+    child_identity=$(fm_meta_identity "$child_meta") || { status=1; break; }
+    child_claim=$(fm_meta_claim_teardown "$child_meta" "$child_identity" "$TEARDOWN_OWNER" "$TEARDOWN_RESUME_TOKEN") || { status=1; break; }
+    child_metas+=("$child_meta")
+    child_claims+=("$child_claim")
   done
+  if [ "$status" -eq 0 ]; then
+    for ((i=0; i<${#child_metas[@]}; i++)); do
+      if cleanup_claimed_firstmate_child "$home" "${child_metas[$i]}" "${child_claims[$i]}"; then
+        :
+      else
+        status=$?
+        break
+      fi
+    done
+  fi
+  for child_meta in "${child_metas[@]}"; do
+    [ -z "$child_meta" ] || fm_meta_release_teardown "$child_meta" "$TEARDOWN_OWNER" 2>/dev/null || true
+  done
+  return "$status"
 }
 
 remove_secondmate_registry_entry() {
@@ -949,9 +989,6 @@ remove_secondmate_registry_entry() {
 if [ "$KIND" = secondmate ]; then
   [ -n "$HOME_PATH" ] || HOME_PATH=$WT
   validate_firstmate_home_for_removal "$HOME_PATH" "secondmate home" "$ID" >/dev/null || exit 1
-  if [ "$FORCE" = "--force" ]; then
-    validate_firstmate_home_children_removal "$HOME_PATH" || exit 1
-  fi
 fi
 
 if [ "$KIND" = secondmate ] && [ "$FORCE" != "--force" ]; then
@@ -985,12 +1022,34 @@ if [ "$BACKEND" = orca ] && [ "$KIND" != scout ] && [ "$KIND" != secondmate ] &&
   ORCA_PATH_MATCH_VERIFIED=1
 fi
 
-TEARDOWN_OWNER=$(fm_meta_new_generation) || { echo "error: could not create teardown owner for $ID" >&2; exit 1; }
-TEARDOWN_IDENTITY=$(fm_meta_claim_teardown "$META" "$META_IDENTITY" "$TEARDOWN_OWNER") || {
+EXISTING_LIFECYCLE=$(fm_meta_get "$META" lifecycle)
+if [ -n "$EXISTING_LIFECYCLE" ] && [ -z "$TEARDOWN_RESUME_TOKEN" ]; then
+  case "$EXISTING_LIFECYCLE" in
+    teardown:*)
+      EXISTING_OWNER=${EXISTING_LIFECYCLE#teardown:}
+      EXISTING_TOKEN=${EXISTING_OWNER%%:*}
+      echo "error: teardown ownership is already recorded for $ID; resume explicitly with --resume $EXISTING_TOKEN" >&2
+      ;;
+    *) echo "error: task $ID has unsupported lifecycle state $EXISTING_LIFECYCLE" >&2 ;;
+  esac
+  exit 1
+fi
+TEARDOWN_OWNER=$(fm_meta_teardown_owner "$TEARDOWN_RESUME_TOKEN") || { echo "error: could not create teardown owner for $ID" >&2; exit 1; }
+TEARDOWN_IDENTITY=$(fm_meta_claim_teardown "$META" "$META_IDENTITY" "$TEARDOWN_OWNER" "$TEARDOWN_RESUME_TOKEN") || {
   TEARDOWN_OWNER=
-  echo "error: task metadata identity changed before teardown; refusing to modify task $ID" >&2
+  echo "error: task metadata changed or teardown ownership is still live; refusing to modify task $ID" >&2
   exit 1
 }
+
+if [ "$KIND" = secondmate ] && [ "$FORCE" = "--force" ]; then
+  [ -z "$T" ] || fm_backend_kill "$BACKEND" "$T" "$(meta_value "$META" zellij_tab_id)" "fm-$ID" 2>/dev/null || true
+  if [ -n "$T" ] && fm_backend_target_exists "$BACKEND" "$T" "fm-$ID" 2>/dev/null; then
+    echo "error: secondmate endpoint $T remained live; refusing child cleanup" >&2
+    exit 1
+  fi
+  PARENT_ENDPOINT_QUIESCED=1
+  validate_firstmate_home_children_removal "$HOME_PATH" || exit 1
+fi
 
 if [ -d "$WT" ] && [ "$FORCE" != "--force" ]; then
   if validate_worktree_teardown_safety; then
@@ -1050,7 +1109,7 @@ elif [ -d "$WT" ] && [ "$KIND" != secondmate ]; then
   }
 fi
 
-if [ "$BACKEND" != orca ]; then
+if [ "$BACKEND" != orca ] && [ "$PARENT_ENDPOINT_QUIESCED" != 1 ]; then
   fm_backend_kill "$BACKEND" "$T" "$(meta_value "$META" zellij_tab_id)" "fm-$ID" 2>/dev/null || true
 fi
 if [ "$KIND" = secondmate ]; then
