@@ -485,7 +485,7 @@ test_spawn_writes_orca_metadata_and_launches_harness() {
   log="$LOG"
   printf '1\n' > "$RESP/1.exit"
   printf '{"ok":true,"result":{"repo":{"id":"repo-spawn"}}}\n' > "$RESP/2.out"
-  printf '{"ok":true,"result":{"worktree":{"id":"wt-spawn","path":"%s"},"terminal":{"handle":"term-spawn"}}}\n' "$wt" > "$RESP/3.out"
+  printf '{"ok":true,"result":{"worktree":{"id":"wt-spawn","path":"%s"},"terminal":{"handle":"term-spawn","paneKey":"11111111-1111-4111-8111-111111111111:22222222-2222-4222-8222-222222222222"}}}\n' "$wt" > "$RESP/3.out"
   out=$( PATH="$FB:$PATH" FM_ORCA_LOG="$LOG" FM_ORCA_RESPONSES="$RESP" \
     FM_ROOT_OVERRIDE="$ROOT" FM_STATE_OVERRIDE="$state" FM_DATA_OVERRIDE="$data" FM_CONFIG_OVERRIDE="$config" \
     FM_PROJECTS_OVERRIDE="$TMP_ROOT/unused-projects" FM_SPAWN_NO_GUARD=1 \
@@ -496,6 +496,8 @@ test_spawn_writes_orca_metadata_and_launches_harness() {
   assert_grep "backend=orca" "$state/$id.meta" "meta missing backend=orca"
   assert_grep "window=fm-$id" "$state/$id.meta" "meta missing stable Orca window alias"
   assert_grep "terminal=term-spawn" "$state/$id.meta" "meta missing terminal handle"
+  assert_grep "orca_pane_key=11111111-1111-4111-8111-111111111111:22222222-2222-4222-8222-222222222222" "$state/$id.meta" \
+    "meta missing the creation JSON pane key"
   assert_grep "orca_worktree_id=wt-spawn" "$state/$id.meta" "meta missing Orca worktree id"
   assert_grep "worktree=$wt" "$state/$id.meta" "meta missing Orca worktree path"
   assert_not_contains "$(cat "$log")" $'orca\x1f''terminal'$'\x1f''create' \
@@ -1272,13 +1274,227 @@ test_dispatcher_sources_orca_and_routes_primitives() {
   pass "fm-backend dispatcher: accepts orca and routes capture through bin/backends/orca.sh"
 }
 
+test_spawn_falls_back_to_terminal_show_for_pane_key() {
+  local proj wt data state config id out
+  id="orcapanez1"
+  proj="$TMP_ROOT/pane-fallback-project"
+  wt="$TMP_ROOT/pane-fallback-wt"
+  data="$TMP_ROOT/pane-fallback-data"
+  state="$TMP_ROOT/pane-fallback-state"
+  config="$TMP_ROOT/pane-fallback-config"
+  fm_git_worktree "$proj" "$wt" "fm/$id"
+  mkdir -p "$data/$id" "$state" "$config"
+  printf 'brief\n' > "$data/$id/brief.md"
+  touch "$state/.last-watcher-beat"
+  orca_case pane-fallback
+  printf '1\n' > "$RESP/1.exit"
+  printf '{"ok":true,"result":{"repo":{"id":"repo-pane"}}}\n' > "$RESP/2.out"
+  printf '{"ok":true,"result":{"worktree":{"id":"wt-pane","path":"%s"},"terminal":{"handle":"term-pane"}}}\n' "$wt" > "$RESP/3.out"
+  printf '{"ok":true,"result":{"terminal":{"worktreeId":"wt-pane","tabId":"11111111-1111-4111-8111-111111111111","leafId":"22222222-2222-4222-8222-222222222222","connected":true,"writable":true}}}\n' > "$RESP/4.out"
+  out=$( PATH="$FB:$PATH" FM_ORCA_LOG="$LOG" FM_ORCA_RESPONSES="$RESP" \
+    FM_ROOT_OVERRIDE="$ROOT" FM_STATE_OVERRIDE="$state" FM_DATA_OVERRIDE="$data" FM_CONFIG_OVERRIDE="$config" \
+    FM_PROJECTS_OVERRIDE="$TMP_ROOT/unused-projects" FM_SPAWN_NO_GUARD=1 \
+    "$ROOT/bin/fm-spawn.sh" "$id" "$proj" claude --backend orca 2>&1 )
+  expect_code 0 $? "Orca spawn should succeed with show-based pane capture"$'\n'"$out"
+  assert_grep "orca_pane_key=11111111-1111-4111-8111-111111111111:22222222-2222-4222-8222-222222222222" "$state/$id.meta" \
+    "show-based pane capture was not recorded"
+  assert_contains "$(cat "$LOG")" $'orca\x1f''terminal'$'\x1f''show'$'\x1f''--terminal'$'\x1f''term-pane'$'\x1f''--json' \
+    "spawn did not fall back to terminal show when creation omitted paneKey"
+  rm -rf "/tmp/fm-$id"
+  pass "fm-spawn.sh --backend orca: falls back to terminal show for orca_pane_key"
+}
+
+test_spawn_rejects_placeholder_pane_key_without_failing() {
+  local proj wt data state config id out
+  id="orcapaneptyz2"
+  proj="$TMP_ROOT/pane-placeholder-project"
+  wt="$TMP_ROOT/pane-placeholder-wt"
+  data="$TMP_ROOT/pane-placeholder-data"
+  state="$TMP_ROOT/pane-placeholder-state"
+  config="$TMP_ROOT/pane-placeholder-config"
+  fm_git_worktree "$proj" "$wt" "fm/$id"
+  mkdir -p "$data/$id" "$state" "$config"
+  printf 'brief\n' > "$data/$id/brief.md"
+  touch "$state/.last-watcher-beat"
+  orca_case pane-placeholder
+  printf '1\n' > "$RESP/1.exit"
+  printf '{"ok":true,"result":{"repo":{"id":"repo-pane-pty"}}}\n' > "$RESP/2.out"
+  printf '{"ok":true,"result":{"worktree":{"id":"wt-pane-pty","path":"%s"},"terminal":{"handle":"term-pane-pty"}}}\n' "$wt" > "$RESP/3.out"
+  printf '{"ok":true,"result":{"terminal":{"worktreeId":"wt-pane-pty","tabId":"pty:opaque","leafId":"pty:opaque","connected":true,"writable":true}}}\n' > "$RESP/4.out"
+  out=$( PATH="$FB:$PATH" FM_ORCA_LOG="$LOG" FM_ORCA_RESPONSES="$RESP" \
+    FM_ROOT_OVERRIDE="$ROOT" FM_STATE_OVERRIDE="$state" FM_DATA_OVERRIDE="$data" FM_CONFIG_OVERRIDE="$config" \
+    FM_PROJECTS_OVERRIDE="$TMP_ROOT/unused-projects" FM_SPAWN_NO_GUARD=1 \
+    "$ROOT/bin/fm-spawn.sh" "$id" "$proj" claude --backend orca 2>&1 )
+  expect_code 0 $? "Orca spawn should remain compatible when pane identity is invalid"$'\n'"$out"
+  assert_no_grep 'orca_pane_key=' "$state/$id.meta" "placeholder pane ids must never be persisted"
+  assert_contains "$out" "stale terminal handles will remain unrecoverable" \
+    "spawn should warn once when no valid pane key can be captured"
+  rm -rf "/tmp/fm-$id"
+  pass "fm-spawn.sh --backend orca: rejects pty placeholders without blocking spawn"
+}
+
+orca_recovery_meta() {  # <state> <id> <terminal> <pane-key>
+  mkdir -p "$1"
+  cat > "$1/$2.meta" <<EOF
+window=fm-$2
+backend=orca
+orca_worktree_id=repo::/scratch
+orca_pane_key=$4
+terminal=$3
+harness=claude
+EOF
+}
+
+orca_stale_handle_recovery_adopts_one_connected_match() {
+  local state meta out log_text
+  orca_case recovery-success
+  state="$CASE_DIR/state"
+  meta="$state/recoverz1.meta"
+  orca_recovery_meta "$state" recoverz1 term-old \
+    11111111-1111-4111-8111-111111111111:22222222-2222-4222-8222-222222222222
+  printf '{"ok":false,"error":{"code":"terminal_handle_stale","message":"stale"}}\n' > "$RESP/1.out"
+  printf '{"ok":true,"result":{"terminals":[{"handle":"term-other"},{"handle":"term-new"}]}}\n' > "$RESP/2.out"
+  printf '{"ok":true,"result":{"terminal":{"worktreeId":"repo::/other","tabId":"11111111-1111-4111-8111-111111111111","leafId":"22222222-2222-4222-8222-222222222222","connected":true,"writable":true}}}\n' > "$RESP/3.out"
+  printf '{"ok":true,"result":{"terminal":{"worktreeId":"repo::/scratch","tabId":"11111111-1111-4111-8111-111111111111","leafId":"22222222-2222-4222-8222-222222222222","connected":true,"writable":true}}}\n' > "$RESP/4.out"
+  printf '{"ok":true,"result":{"terminal":{"tail":["recovered output"]}}}\n' > "$RESP/5.out"
+  out=$( PATH="$FB:$PATH" FM_ORCA_LOG="$LOG" FM_ORCA_RESPONSES="$RESP" FM_STATE_OVERRIDE="$state" \
+    bash -c '. "$0/bin/fm-backend.sh"; fm_backend_capture orca term-old 5' "$ROOT" )
+  [ "$out" = "recovered output" ] || fail "recovered capture should retry once on the new handle, got '$out'"
+  assert_grep 'terminal=term-new' "$meta" "recovery did not rewrite terminal metadata"
+  [ "$(grep -c '^terminal=' "$meta")" -eq 1 ] || fail "recovery should leave exactly one terminal field"
+  assert_grep 'orca_pane_key=11111111-1111-4111-8111-111111111111:22222222-2222-4222-8222-222222222222' "$meta" \
+    "recovery changed the durable pane identity"
+  assert_grep 'harness=claude' "$meta" "recovery changed unrelated metadata"
+  log_text=$(cat "$LOG")
+  assert_contains "$log_text" $'orca\x1f''terminal'$'\x1f''list'$'\x1f''--worktree'$'\x1f''id:repo::/scratch'$'\x1f''--json' \
+    "recovery list was not scoped to the recorded worktree"
+  assert_contains "$log_text" $'orca\x1f''terminal'$'\x1f''read'$'\x1f''--terminal'$'\x1f''term-new' \
+    "original operation was not retried against the recovered handle"
+  pass "orca_stale_handle_recovery_adopts_one_connected_match"
+}
+
+orca_stale_handle_recovery_rejects_zero_and_duplicate_matches() {
+  local state meta out status
+  orca_case recovery-zero
+  state="$CASE_DIR/state"
+  meta="$state/recoverzero.meta"
+  orca_recovery_meta "$state" recoverzero term-old \
+    11111111-1111-4111-8111-111111111111:22222222-2222-4222-8222-222222222222
+  printf '{"ok":false,"error":{"code":"terminal_handle_stale"}}\n' > "$RESP/1.out"
+  printf '{"ok":true,"result":{"terminals":[{"handle":"term-other"}]}}\n' > "$RESP/2.out"
+  printf '{"ok":true,"result":{"terminal":{"worktreeId":"repo::/scratch","tabId":"33333333-3333-4333-8333-333333333333","leafId":"44444444-4444-4444-8444-444444444444","connected":true,"writable":true}}}\n' > "$RESP/3.out"
+  out=$( PATH="$FB:$PATH" FM_ORCA_LOG="$LOG" FM_ORCA_RESPONSES="$RESP" FM_STATE_OVERRIDE="$state" \
+    bash -c '. "$0/bin/fm-backend.sh"; fm_backend_capture orca term-old 5' "$ROOT" 2>&1 )
+  status=$?
+  [ "$status" -ne 0 ] || fail "zero-match recovery must fail"
+  assert_contains "$out" "Orca endpoint gone" "zero-match recovery did not report the gone outcome"
+  assert_grep 'terminal=term-old' "$meta" "zero-match recovery changed metadata"
+
+  orca_case recovery-duplicate
+  state="$CASE_DIR/state"
+  meta="$state/recoverdup.meta"
+  orca_recovery_meta "$state" recoverdup term-old \
+    11111111-1111-4111-8111-111111111111:22222222-2222-4222-8222-222222222222
+  printf '{"ok":false,"error":{"code":"terminal_handle_stale"}}\n' > "$RESP/1.out"
+  printf '{"ok":true,"result":{"terminals":[{"handle":"term-a"},{"handle":"term-b"}]}}\n' > "$RESP/2.out"
+  printf '{"ok":true,"result":{"terminal":{"worktreeId":"repo::/scratch","tabId":"11111111-1111-4111-8111-111111111111","leafId":"22222222-2222-4222-8222-222222222222","connected":true,"writable":true}}}\n' > "$RESP/3.out"
+  printf '{"ok":true,"result":{"terminal":{"worktreeId":"repo::/scratch","tabId":"11111111-1111-4111-8111-111111111111","leafId":"22222222-2222-4222-8222-222222222222","connected":true,"writable":true}}}\n' > "$RESP/4.out"
+  out=$( PATH="$FB:$PATH" FM_ORCA_LOG="$LOG" FM_ORCA_RESPONSES="$RESP" FM_STATE_OVERRIDE="$state" \
+    bash -c '. "$0/bin/fm-backend.sh"; fm_backend_capture orca term-old 5' "$ROOT" 2>&1 )
+  status=$?
+  [ "$status" -ne 0 ] || fail "duplicate-match recovery must fail"
+  assert_contains "$out" "recovery ambiguous" "duplicate recovery did not report ambiguity"
+  assert_contains "$out" "term-a term-b" "ambiguous recovery did not name both handles"
+  assert_grep 'terminal=term-old' "$meta" "duplicate recovery changed metadata"
+  pass "orca_stale_handle_recovery_rejects_zero_and_duplicate_matches"
+}
+
+orca_stale_handle_recovery_rejects_disconnected_and_unresolved_candidates() {
+  local state meta out status
+  orca_case recovery-disconnected
+  state="$CASE_DIR/state"
+  meta="$state/recoverdead.meta"
+  orca_recovery_meta "$state" recoverdead term-old \
+    11111111-1111-4111-8111-111111111111:22222222-2222-4222-8222-222222222222
+  printf '{"ok":false,"error":{"code":"terminal_handle_stale"}}\n' > "$RESP/1.out"
+  printf '{"ok":true,"result":{"terminals":[{"handle":"term-dead"}]}}\n' > "$RESP/2.out"
+  printf '{"ok":true,"result":{"terminal":{"worktreeId":"repo::/scratch","tabId":"11111111-1111-4111-8111-111111111111","leafId":"22222222-2222-4222-8222-222222222222","connected":false,"writable":false}}}\n' > "$RESP/3.out"
+  out=$( PATH="$FB:$PATH" FM_ORCA_LOG="$LOG" FM_ORCA_RESPONSES="$RESP" FM_STATE_OVERRIDE="$state" \
+    bash -c '. "$0/bin/fm-backend.sh"; fm_backend_capture orca term-old 5' "$ROOT" 2>&1 )
+  status=$?
+  [ "$status" -ne 0 ] || fail "disconnected recovery candidate must fail"
+  assert_contains "$out" "endpoint disconnected" "disconnected match did not report the dead-endpoint outcome"
+  assert_grep 'terminal=term-old' "$meta" "disconnected recovery changed metadata"
+
+  orca_case recovery-unresolved
+  state="$CASE_DIR/state"
+  meta="$state/recoverunresolved.meta"
+  orca_recovery_meta "$state" recoverunresolved term-old \
+    11111111-1111-4111-8111-111111111111:22222222-2222-4222-8222-222222222222
+  printf '{"ok":false,"error":{"code":"terminal_handle_stale"}}\n' > "$RESP/1.out"
+  printf '{"ok":true,"result":{"terminals":[{"handle":"term-other"},{"handle":"term-unreadable"}]}}\n' > "$RESP/2.out"
+  printf '{"ok":true,"result":{"terminal":{"worktreeId":"repo::/scratch","tabId":"33333333-3333-4333-8333-333333333333","leafId":"44444444-4444-4444-8444-444444444444","connected":true,"writable":true}}}\n' > "$RESP/3.out"
+  printf '{"ok":false,"error":{"code":"runtime_unavailable"}}\n' > "$RESP/4.out"
+  out=$( PATH="$FB:$PATH" FM_ORCA_LOG="$LOG" FM_ORCA_RESPONSES="$RESP" FM_STATE_OVERRIDE="$state" \
+    bash -c '. "$0/bin/fm-backend.sh"; fm_backend_capture orca term-old 5' "$ROOT" 2>&1 )
+  status=$?
+  [ "$status" -ne 0 ] || fail "one unreadable candidate must fail the entire recovery"
+  assert_contains "$out" "recovery unresolved" "unreadable candidate did not report unresolved"
+  assert_grep 'terminal=term-old' "$meta" "unresolved recovery changed metadata"
+  pass "orca_stale_handle_recovery_rejects_disconnected_and_unresolved_candidates"
+}
+
+orca_recovery_triggers_only_for_stale_and_requires_new_metadata() {
+  local state meta out status log_text
+  orca_case recovery-runtime-unavailable
+  state="$CASE_DIR/state"
+  meta="$state/recoverruntime.meta"
+  orca_recovery_meta "$state" recoverruntime term-old \
+    11111111-1111-4111-8111-111111111111:22222222-2222-4222-8222-222222222222
+  printf '{"ok":false,"error":{"code":"runtime_unavailable","message":"runtime down"}}\n' > "$RESP/1.out"
+  out=$( PATH="$FB:$PATH" FM_ORCA_LOG="$LOG" FM_ORCA_RESPONSES="$RESP" FM_STATE_OVERRIDE="$state" \
+    bash -c '. "$0/bin/fm-backend.sh"; fm_backend_capture orca term-old 5' "$ROOT" 2>&1 )
+  status=$?
+  [ "$status" -ne 0 ] || fail "runtime_unavailable must fail without recovery"
+  assert_contains "$out" "runtime_unavailable" "non-stale error should surface unchanged"
+  log_text=$(cat "$LOG")
+  assert_not_contains "$log_text" $'orca\x1f''terminal'$'\x1f''list' "runtime_unavailable must not trigger recovery"
+
+  orca_case recovery-legacy-meta
+  state="$CASE_DIR/state"
+  mkdir -p "$state"
+  meta="$state/recoverlegacy.meta"
+  printf 'window=fm-recoverlegacy\nbackend=orca\norca_worktree_id=repo::/scratch\nterminal=term-old\n' > "$meta"
+  printf '{"ok":false,"error":{"code":"terminal_handle_stale","message":"legacy stale"}}\n' > "$RESP/1.out"
+  out=$( PATH="$FB:$PATH" FM_ORCA_LOG="$LOG" FM_ORCA_RESPONSES="$RESP" FM_STATE_OVERRIDE="$state" \
+    bash -c '. "$0/bin/fm-backend.sh"; fm_backend_capture orca term-old 5' "$ROOT" 2>&1 )
+  status=$?
+  [ "$status" -ne 0 ] || fail "legacy stale handle should retain the old failure"
+  assert_contains "$out" "legacy stale" "legacy stale error should surface unchanged"
+  assert_not_contains "$(cat "$LOG")" $'orca\x1f''terminal'$'\x1f''list' "legacy metadata must not trigger recovery"
+  assert_grep 'terminal=term-old' "$meta" "legacy failure changed metadata"
+  pass "orca_recovery_triggers_only_for_stale_and_requires_new_metadata"
+}
+
+orca_pane_key_validation_is_strict() {
+  bash -c '
+    . "$0/bin/backends/orca.sh"
+    fm_backend_orca_pane_key_valid "11111111-1111-4111-8111-111111111111:22222222-2222-4222-8222-222222222222"
+    ! fm_backend_orca_pane_key_valid "a:b:c"
+    ! fm_backend_orca_pane_key_valid ":22222222-2222-4222-8222-222222222222"
+    ! fm_backend_orca_pane_key_valid "tab:not-a-uuid"
+    ! fm_backend_orca_pane_key_valid "pty:opaque:22222222-2222-4222-8222-222222222222"
+  ' "$ROOT" || fail "pane key validation accepted an invalid shape or rejected the valid shape"
+  pass "orca_pane_key_validation_is_strict"
+}
+
 # Semantic liveness fixtures mirror the E1b-observed `terminal show` and
 # `worktree ps` shapes. The join is always tabId:leafId, never terminal list.
 orca_snapshot_selects_only_recorded_worktree_and_matching_agent() {
   local busy log_text
   orca_case liveness-exact-join
-  printf '{"ok":true,"result":{"terminal":{"worktreeId":"repo::/scratch","tabId":"tab-a","leafId":"leaf-a","connected":true,"writable":true}}}\n' > "$RESP/1.out"
-  printf '{"ok":true,"result":{"worktrees":[{"worktreeId":"repo::/other","agents":[{"paneKey":"tab-a:leaf-a","state":"done"}]},{"worktreeId":"repo::/scratch","agents":[{"paneKey":"tab-b:leaf-b","state":"done"},{"paneKey":"tab-a:leaf-a","state":"working"}]}]}}\n' > "$RESP/2.out"
+  printf '{"ok":true,"result":{"terminal":{"worktreeId":"repo::/scratch","tabId":"11111111-1111-4111-8111-111111111111","leafId":"22222222-2222-4222-8222-222222222222","connected":true,"writable":true}}}\n' > "$RESP/1.out"
+  printf '{"ok":true,"result":{"worktrees":[{"worktreeId":"repo::/other","agents":[{"paneKey":"11111111-1111-4111-8111-111111111111:22222222-2222-4222-8222-222222222222","state":"done"}]},{"worktreeId":"repo::/scratch","agents":[{"paneKey":"33333333-3333-4333-8333-333333333333:44444444-4444-4444-8444-444444444444","state":"done"},{"paneKey":"11111111-1111-4111-8111-111111111111:22222222-2222-4222-8222-222222222222","state":"working"}]}]}}\n' > "$RESP/2.out"
   busy=$( PATH="$FB:$PATH" FM_ORCA_LOG="$LOG" FM_ORCA_RESPONSES="$RESP" \
     bash -c '. "$0/bin/fm-backend.sh"; fm_backend_busy_state orca term-recorded repo::/scratch' "$ROOT" )
   [ "$busy" = busy ] || fail "exact recorded worktree/pane join should report busy, got '$busy'"
@@ -1295,12 +1511,12 @@ orca_snapshot_selects_only_recorded_worktree_and_matching_agent() {
 orca_busy_and_alive_map_only_working_and_turn_complete_done() {
   local busy alive
   orca_case liveness-working-done
-  printf '{"ok":true,"result":{"terminal":{"worktreeId":"repo::/scratch","tabId":"tab-a","leafId":"leaf-a","connected":true,"writable":true}}}\n' > "$RESP/1.out"
-  printf '{"ok":true,"result":{"worktrees":[{"worktreeId":"repo::/scratch","agents":[{"paneKey":"tab-a:leaf-a","state":"working"}]}]}}\n' > "$RESP/2.out"
-  printf '{"ok":true,"result":{"terminal":{"worktreeId":"repo::/scratch","tabId":"tab-a","leafId":"leaf-a","connected":true,"writable":true}}}\n' > "$RESP/3.out"
-  printf '{"ok":true,"result":{"worktrees":[{"worktreeId":"repo::/scratch","agents":[{"paneKey":"tab-a:leaf-a","state":"done"}]}]}}\n' > "$RESP/4.out"
-  printf '{"ok":true,"result":{"terminal":{"worktreeId":"repo::/scratch","tabId":"tab-a","leafId":"leaf-a","connected":true,"writable":true}}}\n' > "$RESP/5.out"
-  printf '{"ok":true,"result":{"worktrees":[{"worktreeId":"repo::/scratch","agents":[{"paneKey":"tab-a:leaf-a","state":"done"}]}]}}\n' > "$RESP/6.out"
+  printf '{"ok":true,"result":{"terminal":{"worktreeId":"repo::/scratch","tabId":"11111111-1111-4111-8111-111111111111","leafId":"22222222-2222-4222-8222-222222222222","connected":true,"writable":true}}}\n' > "$RESP/1.out"
+  printf '{"ok":true,"result":{"worktrees":[{"worktreeId":"repo::/scratch","agents":[{"paneKey":"11111111-1111-4111-8111-111111111111:22222222-2222-4222-8222-222222222222","state":"working"}]}]}}\n' > "$RESP/2.out"
+  printf '{"ok":true,"result":{"terminal":{"worktreeId":"repo::/scratch","tabId":"11111111-1111-4111-8111-111111111111","leafId":"22222222-2222-4222-8222-222222222222","connected":true,"writable":true}}}\n' > "$RESP/3.out"
+  printf '{"ok":true,"result":{"worktrees":[{"worktreeId":"repo::/scratch","agents":[{"paneKey":"11111111-1111-4111-8111-111111111111:22222222-2222-4222-8222-222222222222","state":"done"}]}]}}\n' > "$RESP/4.out"
+  printf '{"ok":true,"result":{"terminal":{"worktreeId":"repo::/scratch","tabId":"11111111-1111-4111-8111-111111111111","leafId":"22222222-2222-4222-8222-222222222222","connected":true,"writable":true}}}\n' > "$RESP/5.out"
+  printf '{"ok":true,"result":{"worktrees":[{"worktreeId":"repo::/scratch","agents":[{"paneKey":"11111111-1111-4111-8111-111111111111:22222222-2222-4222-8222-222222222222","state":"done"}]}]}}\n' > "$RESP/6.out"
   busy=$( PATH="$FB:$PATH" FM_ORCA_LOG="$LOG" FM_ORCA_RESPONSES="$RESP" \
     bash -c '. "$0/bin/fm-backend.sh"; fm_backend_busy_state orca term-recorded repo::/scratch' "$ROOT" )
   alive=$( PATH="$FB:$PATH" FM_ORCA_LOG="$LOG" FM_ORCA_RESPONSES="$RESP" \
@@ -1313,7 +1529,7 @@ orca_busy_and_alive_map_only_working_and_turn_complete_done() {
 orca_agent_disappearance_after_exit_reports_dead() {
   local alive
   orca_case liveness-exited
-  printf '{"ok":true,"result":{"terminal":{"worktreeId":"repo::/scratch","tabId":"tab-a","leafId":"leaf-a","connected":true,"writable":true}}}\n' > "$RESP/1.out"
+  printf '{"ok":true,"result":{"terminal":{"worktreeId":"repo::/scratch","tabId":"11111111-1111-4111-8111-111111111111","leafId":"22222222-2222-4222-8222-222222222222","connected":true,"writable":true}}}\n' > "$RESP/1.out"
   printf '{"ok":true,"result":{"worktrees":[{"worktreeId":"repo::/scratch","agents":[]}]}}\n' > "$RESP/2.out"
   alive=$( PATH="$FB:$PATH" FM_ORCA_LOG="$LOG" FM_ORCA_RESPONSES="$RESP" \
     bash -c '. "$0/bin/fm-backend.sh"; fm_backend_agent_alive orca term-recorded repo::/scratch' "$ROOT" )
@@ -1324,12 +1540,12 @@ orca_agent_disappearance_after_exit_reports_dead() {
 orca_snapshot_rejects_cross_worktree_placeholder_and_duplicates() {
   local cross placeholder duplicate_worktrees duplicate_agents
   orca_case liveness-identity-rejections
-  printf '{"ok":true,"result":{"terminal":{"worktreeId":"repo::/other","tabId":"tab-a","leafId":"leaf-a","connected":true,"writable":true}}}\n' > "$RESP/1.out"
+  printf '{"ok":true,"result":{"terminal":{"worktreeId":"repo::/other","tabId":"11111111-1111-4111-8111-111111111111","leafId":"22222222-2222-4222-8222-222222222222","connected":true,"writable":true}}}\n' > "$RESP/1.out"
   printf '{"ok":true,"result":{"terminal":{"worktreeId":"repo::/scratch","tabId":"pty:opaque","leafId":"pty:opaque","connected":true,"writable":true}}}\n' > "$RESP/2.out"
-  printf '{"ok":true,"result":{"terminal":{"worktreeId":"repo::/scratch","tabId":"tab-a","leafId":"leaf-a","connected":true,"writable":true}}}\n' > "$RESP/3.out"
+  printf '{"ok":true,"result":{"terminal":{"worktreeId":"repo::/scratch","tabId":"11111111-1111-4111-8111-111111111111","leafId":"22222222-2222-4222-8222-222222222222","connected":true,"writable":true}}}\n' > "$RESP/3.out"
   printf '{"ok":true,"result":{"worktrees":[{"worktreeId":"repo::/scratch","agents":[]},{"worktreeId":"repo::/scratch","agents":[]}]}}\n' > "$RESP/4.out"
-  printf '{"ok":true,"result":{"terminal":{"worktreeId":"repo::/scratch","tabId":"tab-a","leafId":"leaf-a","connected":true,"writable":true}}}\n' > "$RESP/5.out"
-  printf '{"ok":true,"result":{"worktrees":[{"worktreeId":"repo::/scratch","agents":[{"paneKey":"tab-a:leaf-a","state":"working"},{"paneKey":"tab-a:leaf-a","state":"done"}]}]}}\n' > "$RESP/6.out"
+  printf '{"ok":true,"result":{"terminal":{"worktreeId":"repo::/scratch","tabId":"11111111-1111-4111-8111-111111111111","leafId":"22222222-2222-4222-8222-222222222222","connected":true,"writable":true}}}\n' > "$RESP/5.out"
+  printf '{"ok":true,"result":{"worktrees":[{"worktreeId":"repo::/scratch","agents":[{"paneKey":"11111111-1111-4111-8111-111111111111:22222222-2222-4222-8222-222222222222","state":"working"},{"paneKey":"11111111-1111-4111-8111-111111111111:22222222-2222-4222-8222-222222222222","state":"done"}]}]}}\n' > "$RESP/6.out"
   cross=$( PATH="$FB:$PATH" FM_ORCA_LOG="$LOG" FM_ORCA_RESPONSES="$RESP" \
     bash -c '. "$0/bin/fm-backend.sh"; fm_backend_agent_alive orca term-recorded repo::/scratch' "$ROOT" )
   placeholder=$( PATH="$FB:$PATH" FM_ORCA_LOG="$LOG" FM_ORCA_RESPONSES="$RESP" \
@@ -1348,13 +1564,13 @@ orca_snapshot_rejects_errors_malformed_json_and_unknown_states() {
   orca_case liveness-invalid-results
   printf '{"ok":false,"error":{"code":"terminal_handle_stale"}}\n' > "$RESP/1.out"
   printf '{not-json\n' > "$RESP/2.out"
-  printf '{"ok":true,"result":{"terminal":{"worktreeId":"repo::/scratch","tabId":"tab-a","leafId":"leaf-a","connected":true,"writable":true}}}\n' > "$RESP/3.out"
+  printf '{"ok":true,"result":{"terminal":{"worktreeId":"repo::/scratch","tabId":"11111111-1111-4111-8111-111111111111","leafId":"22222222-2222-4222-8222-222222222222","connected":true,"writable":true}}}\n' > "$RESP/3.out"
   printf '{"ok":false,"error":{"code":"runtime_unavailable"}}\n' > "$RESP/4.out"
-  printf '{"ok":true,"result":{"terminal":{"worktreeId":"repo::/scratch","tabId":"tab-a","leafId":"leaf-a","connected":true,"writable":true}}}\n' > "$RESP/5.out"
+  printf '{"ok":true,"result":{"terminal":{"worktreeId":"repo::/scratch","tabId":"11111111-1111-4111-8111-111111111111","leafId":"22222222-2222-4222-8222-222222222222","connected":true,"writable":true}}}\n' > "$RESP/5.out"
   printf '{not-json\n' > "$RESP/6.out"
-  printf '{"ok":true,"result":{"terminal":{"worktreeId":"repo::/scratch","tabId":"tab-a","leafId":"leaf-a","connected":true,"writable":true}}}\n' > "$RESP/7.out"
-  printf '{"ok":true,"result":{"worktrees":[{"worktreeId":"repo::/scratch","agents":[{"paneKey":"tab-a:leaf-a","state":"waiting"}]}]}}\n' > "$RESP/8.out"
-  printf '{"ok":true,"result":{"terminal":{"worktreeId":"repo::/scratch","tabId":"tab-a","leafId":"leaf-a","connected":false,"writable":true}}}\n' > "$RESP/9.out"
+  printf '{"ok":true,"result":{"terminal":{"worktreeId":"repo::/scratch","tabId":"11111111-1111-4111-8111-111111111111","leafId":"22222222-2222-4222-8222-222222222222","connected":true,"writable":true}}}\n' > "$RESP/7.out"
+  printf '{"ok":true,"result":{"worktrees":[{"worktreeId":"repo::/scratch","agents":[{"paneKey":"11111111-1111-4111-8111-111111111111:22222222-2222-4222-8222-222222222222","state":"waiting"}]}]}}\n' > "$RESP/8.out"
+  printf '{"ok":true,"result":{"terminal":{"worktreeId":"repo::/scratch","tabId":"11111111-1111-4111-8111-111111111111","leafId":"22222222-2222-4222-8222-222222222222","connected":false,"writable":true}}}\n' > "$RESP/9.out"
   show_error=$( PATH="$FB:$PATH" FM_ORCA_LOG="$LOG" FM_ORCA_RESPONSES="$RESP" bash -c '. "$0/bin/fm-backend.sh"; fm_backend_agent_alive orca term repo::/scratch' "$ROOT" )
   malformed_show=$( PATH="$FB:$PATH" FM_ORCA_LOG="$LOG" FM_ORCA_RESPONSES="$RESP" bash -c '. "$0/bin/fm-backend.sh"; fm_backend_agent_alive orca term repo::/scratch' "$ROOT" )
   ps_error=$( PATH="$FB:$PATH" FM_ORCA_LOG="$LOG" FM_ORCA_RESPONSES="$RESP" bash -c '. "$0/bin/fm-backend.sh"; fm_backend_agent_alive orca term repo::/scratch' "$ROOT" )
@@ -1406,6 +1622,13 @@ test_remove_worktree_refuses_empty_id
 test_remove_worktree_rejects_orca_error_json
 test_worktree_path_resolves_id
 test_dispatcher_sources_orca_and_routes_primitives
+test_spawn_falls_back_to_terminal_show_for_pane_key
+test_spawn_rejects_placeholder_pane_key_without_failing
+orca_stale_handle_recovery_adopts_one_connected_match
+orca_stale_handle_recovery_rejects_zero_and_duplicate_matches
+orca_stale_handle_recovery_rejects_disconnected_and_unresolved_candidates
+orca_recovery_triggers_only_for_stale_and_requires_new_metadata
+orca_pane_key_validation_is_strict
 orca_snapshot_selects_only_recorded_worktree_and_matching_agent
 orca_busy_and_alive_map_only_working_and_turn_complete_done
 orca_agent_disappearance_after_exit_reports_dead

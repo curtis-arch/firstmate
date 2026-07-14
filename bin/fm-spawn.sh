@@ -190,21 +190,30 @@ fi
 ORCA_ABORT_CLEANUP=0
 ORCA_WORKTREE_ID=
 ORCA_TERMINAL=
+ORCA_PANE_KEY=
 
 parse_orca_worktree_result() {
-  local raw=$1 rest
+  local raw=$1 rest terminal_rest
   ORCA_WORKTREE_ID=${raw%%$'\t'*}
   if [ "$raw" = "$ORCA_WORKTREE_ID" ]; then
     WT=
     ORCA_TERMINAL=
+    ORCA_PANE_KEY=
     return 1
   fi
   rest=${raw#*$'\t'}
   WT=${rest%%$'\t'*}
   if [ "$rest" != "$WT" ]; then
-    ORCA_TERMINAL=${rest#*$'\t'}
+    terminal_rest=${rest#*$'\t'}
+    ORCA_TERMINAL=${terminal_rest%%$'\t'*}
+    if [ "$terminal_rest" != "$ORCA_TERMINAL" ]; then
+      ORCA_PANE_KEY=${terminal_rest#*$'\t'}
+    else
+      ORCA_PANE_KEY=
+    fi
   else
     ORCA_TERMINAL=
+    ORCA_PANE_KEY=
   fi
 }
 
@@ -233,6 +242,7 @@ orca_spawn_abort_cleanup() {
           echo "backend=orca"
           echo "orca_worktree_id=$ORCA_WORKTREE_ID"
           [ -z "${ORCA_TERMINAL:-}" ] || echo "terminal=$ORCA_TERMINAL"
+          [ -z "${ORCA_PANE_KEY:-}" ] || echo "orca_pane_key=$ORCA_PANE_KEY"
         } > "$STATE/$ID.meta" 2>/dev/null || true
       fi
     fi
@@ -787,7 +797,18 @@ EOF
     fi
     validate_spawn_worktree "orca worktree create" "$W"
     if [ -z "$ORCA_TERMINAL" ]; then
-      ORCA_TERMINAL=$(fm_backend_orca_terminal_create "$ORCA_WORKTREE_ID" "$W") || exit 1
+      ORCA_TERMINAL_RAW=$(fm_backend_orca_terminal_create "$ORCA_WORKTREE_ID" "$W") || exit 1
+      ORCA_TERMINAL=${ORCA_TERMINAL_RAW%%$'\t'*}
+      if [ "$ORCA_TERMINAL_RAW" != "$ORCA_TERMINAL" ]; then
+        ORCA_PANE_KEY=${ORCA_TERMINAL_RAW#*$'\t'}
+      fi
+    fi
+    if ! fm_backend_orca_pane_key_valid "$ORCA_PANE_KEY"; then
+      ORCA_PANE_KEY=$(fm_backend_orca_capture_pane_key "$ORCA_TERMINAL" "$ORCA_WORKTREE_ID" 2>/dev/null || true)
+    fi
+    if ! fm_backend_orca_pane_key_valid "$ORCA_PANE_KEY"; then
+      ORCA_PANE_KEY=
+      echo "warning: Orca did not expose a durable pane key for $W; stale terminal handles will remain unrecoverable" >&2
     fi
     T="$ORCA_TERMINAL"
     ;;
@@ -1018,6 +1039,7 @@ META_WINDOW=$T
   if [ "$BACKEND" = orca ]; then
     echo "orca_worktree_id=$ORCA_WORKTREE_ID"
     echo "terminal=$ORCA_TERMINAL"
+    [ -z "$ORCA_PANE_KEY" ] || echo "orca_pane_key=$ORCA_PANE_KEY"
   fi
   if [ "$BACKEND" = cmux ]; then
     echo "cmux_workspace_id=$CMUX_WORKSPACE_ID"

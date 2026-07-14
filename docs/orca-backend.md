@@ -23,10 +23,10 @@ First run: before spawn mutates any repo or worktree state, firstmate runs `orca
 Spawn fails closed if the runtime is not ready.
 The first spawn against a given project also auto-registers that project's repo in Orca (`orca repo add --path`) if it is not already registered - no manual registration step is needed.
 
-Watching and attaching: Orca owns both the worktree and the terminal for its tasks, so there is nothing to attach to outside the Orca app itself - open the app and find the terminal for the task (recorded as `terminal=<handle>` in the task's meta, with `window=fm-<id>` as the shared firstmate alias).
+Watching and attaching: Orca owns both the worktree and the terminal for its tasks, so there is nothing to attach to outside the Orca app itself - open the app and find the terminal for the task (recorded as `terminal=<handle>` plus durable `orca_pane_key=<tabId>:<leafId>` in the task's meta, with `window=fm-<id>` as the shared firstmate alias).
 You do not need to open the app for routine supervision: from an active firstmate session, `bin/fm-peek.sh <id>` reads a task's terminal without opening Orca, and `FM_HOME=<this-firstmate-home> bin/fm-send.sh <id> "<text>"` steers it unless `FM_HOME` is already set to the active firstmate home (the stable `fm-<id>` alias also works; Enter and Ctrl-C are supported; Escape is not).
 
-Verify it works by spawning a trivial task with `--backend orca` and confirming the task's meta records `backend=orca`, `terminal=`, `orca_worktree_id=`, and `worktree=`; the Orca app should show a new terminal for the task.
+Verify it works by spawning a trivial task with `--backend orca` and confirming the task's meta records `backend=orca`, `terminal=`, `orca_pane_key=`, `orca_worktree_id=`, and `worktree=`; the Orca app should show a new terminal for the task.
 
 Limitations: `--secondmate` spawns refuse `backend=orca` (secondmate-home semantics need a separate design), Escape is unsupported, Orca is macOS-only and explicit-only, and it exposes no stable CLI version marker, so spawn gates on runtime reachability instead of a version floor - see "Limitations" below for the complete list.
 
@@ -55,13 +55,14 @@ An Orca-spawned task records the normal task fields plus these Orca-specific fie
 backend=orca
 window=fm-<id>
 terminal=<orca terminal handle>
+orca_pane_key=<orca tab UUID>:<orca leaf UUID>
 orca_worktree_id=<orca worktree id>
 worktree=<absolute path to the Orca-created git worktree>
 ```
 
 `window=` remains the shared firstmate alias used by selector-driven supervision tools after a task selector has resolved through metadata.
 `fm-teardown.sh <id>` uses the same recorded fields after loading `state/<id>.meta`.
-For Orca, `window=` keeps the stable firstmate alias while `terminal=` carries the stable Orca terminal handle that backend operations use.
+For Orca, `window=` keeps the stable firstmate alias, `terminal=` carries the runtime-epoch handle that backend operations use, and `orca_pane_key=` carries the remint-stable pane identity used to recover that handle.
 The recorded `backend=orca` field tells shared call sites to route capture, send, interrupt, and close through `bin/backends/orca.sh` instead of tmux assumptions.
 
 ## Lifecycle
@@ -71,8 +72,10 @@ Spawn:
 1. Ensure the project repo is registered in Orca, adding it with `orca repo add --path` when needed.
 2. Create an independent Orca worktree with `orca worktree create --repo id:<repo> --name fm-<id> --no-parent --setup skip`.
 3. Reuse the terminal returned by Orca worktree creation only when it appears in the verified `result.terminal.handle` shape, or create a titled terminal in that worktree when Orca returns only the worktree.
-4. Install firstmate's per-harness turn-end hooks in the Orca worktree.
-5. Write metadata, then send `GOTMPDIR` export and the selected harness launch through the recorded Orca terminal.
+4. Record a validated `result.terminal.paneKey` when creation returns it, otherwise compose the same pane key from `terminal show`'s UUID `tabId` and `leafId`.
+   Missing or invalid pane identity warns but does not block spawn, preserving compatibility with older Orca shapes.
+5. Install firstmate's per-harness turn-end hooks in the Orca worktree.
+6. Write metadata, then send `GOTMPDIR` export and the selected harness launch through the recorded Orca terminal.
 
 Operation routing:
 
@@ -84,6 +87,15 @@ Operation routing:
 - `fm-watch.sh` joins the recorded terminal to Orca's native per-agent state through `terminal show` and `worktree ps`.
   A verified `working` agent is busy and a verified turn-complete `done` agent is idle; every unknown result retains the existing terminal-tail fallback.
 - `fm-crew-state.sh` reads the recorded Orca terminal when no no-mistakes run-step applies.
+
+Stale-handle recovery:
+
+- Recovery runs only when a handle operation returns exact error code `terminal_handle_stale` and the task meta has both a recorded `orca_worktree_id` and a valid `orca_pane_key`.
+- Firstmate lists candidates with `orca terminal list --worktree id:<recorded-worktree> --json`, then resolves every candidate through `terminal show` because list results can contain non-joinable `pty:` placeholders.
+- Exactly one connected candidate whose `worktreeId` and `tabId:leafId` equal the recorded identities replaces `terminal=` atomically, and the original operation is retried once.
+- Zero matches, duplicate matches, disconnected matches, unreadable candidates, malformed JSON, list failure, and every non-stale error leave metadata unchanged and fail closed.
+- Recovery never searches another worktree, guesses from titles or ordering, selects the first candidate, or creates a replacement terminal.
+- Existing task metas without `orca_pane_key` retain their prior behavior: live handles continue to work, while a stale handle surfaces the original Orca error without attempting recovery.
 
 Teardown:
 
@@ -99,6 +111,8 @@ Teardown:
 - Escape is unsupported because the current Orca terminal send primitive exposes Enter and interrupt-style input but no verified Escape operation.
 - Orca is explicit-only and is not selected by runtime auto-detection.
 - Orca currently exposes no stable CLI version or protocol marker. Unlike the herdr/zellij/cmux docs, this backend intentionally gates spawn support on runtime reachability from `orca status --json` rather than a version floor.
+- Pane-key durability across an actual observed app restart remains unverified.
+  Orca source defines pane keys as persisted remint-stable identities and the recovery path is fail-closed, but the first natural or captain-approved restart still needs the documented post-restart smoke check.
 
 ## Verification
 
@@ -207,6 +221,36 @@ P1 therefore maps only these observed shapes:
 The normalized snapshot parser lives in `bin/backends/orca.sh` and is reached only through `bin/fm-backend.sh`.
 Runtime-global aggregate worktree status and first-agent selection are never used.
 Orca remains a pull backend, so this does not add event waits or replace the watcher loop.
+
+### Durable endpoint E2 - P2 accepted (2026-07-14)
+
+The read-only E2 scout ran against Orca application `1.4.139`, runtime ID `3a18045d-23fb-48b7-af03-6736761ad120`, and exact task worktree `69c04545-e3dd-467f-9b35-0eb698cc41a7::/Users/johncurtis/orca/workspaces/firstmate/fm-orca-p2-contract-e2`.
+The complete evidence report is `/Users/johncurtis/projects/firstmate/data/orca-p2-contract-e2/report.md`.
+
+The stale-handle probe returned the exact recovery trigger:
+
+```console
+$ orca terminal show --terminal term_00000000-0000-4000-8000-000000000000 --json
+{"ok":false,"error":{"code":"terminal_handle_stale"}}
+```
+
+The scout then created one disposable terminal and observed creation-time pane identity directly; the report retained the handle in abbreviated form and the pane key in full:
+
+```console
+$ orca terminal create --worktree id:<recorded-worktree-id> --title fm-p2-probe --json
+{"ok":true,"result":{"terminal":{"handle":"term_18858232-...","paneKey":"58f16f30-eee4-478c-8544-5b1d9547a953:acc89229-0849-4fbe-a6e9-8b9db1cb2da0"}}}
+```
+
+`terminal list` enumerated three worktree-scoped handles with `pty:` placeholder ids.
+`terminal show` on all three returned real UUID identities, and exactly one candidate matched the recorded pane key and worktree id.
+After the probe terminal was closed, list returned only the original two terminals; the just-closed handle briefly remained showable with `connected:false`, which is why recovery refuses disconnected matches.
+The detached Orca terminal daemon was also directly observed to predate the current app process, but the exact pane-key transition across a controlled app restart was not performed because the app hosted the primary session.
+
+The implementation therefore treats restart survival as source-backed and fail-closed rather than as directly observed runtime behavior.
+If the pane key did not survive, recovery returns zero matches and preserves metadata; it cannot bind another endpoint without exact unique worktree and pane-key equality.
+
+### Earlier adapter smoke
+
 Real-Orca smoke verification was run against `/usr/local/bin/orca` with `/Applications/Orca.app` reporting bundle version `1.4.116`; `orca status --json` reported `result.runtime.reachable=true` and `result.runtime.state="ready"`.
 The verified terminal creation handle field is `result.terminal.handle` from `orca terminal create --json`; worktree creation returned `result.worktree.id` and `result.worktree.path` in the same smoke run.
 Firstmate intentionally ignores speculative terminal-handle shapes such as bare `result.id` and nested `result.worktree.terminal` until a real Orca smoke run proves them.
@@ -218,6 +262,8 @@ Fake-Orca tests cover:
 - runtime readiness gating through `orca status --json`;
 - exact `terminal show` to `worktree ps` semantic joins, including `working`, turn-complete `done`, and post-exit agent disappearance;
 - fail-closed handling for malformed/error JSON, cross-worktree and duplicate identities, placeholder ids, disconnected terminals, and unknown states;
+- creation-time and show-fallback `orca_pane_key` capture;
+- exact stale-handle recovery, one-retry adoption, zero/duplicate/disconnected/unresolved outcomes, non-stale errors, and legacy metadata;
 - `fm-spawn.sh --backend orca` metadata creation and harness launch;
 - `fm-peek.sh`, `fm-send.sh`, and `fm-crew-state.sh` routing through recorded Orca metadata;
 - slash-command popup placeholder handling that requires a second Enter before `fm-send.sh` reports submission;
