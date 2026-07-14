@@ -2,6 +2,7 @@ projects/
 state/
 data/
 .no-mistakes/
+codedb.snapshot
 .lavish/
 .fm-secondmate-home
 .DS_Store

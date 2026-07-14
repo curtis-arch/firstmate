@@ -1348,6 +1348,7 @@ orca_worktree_id=repo::/scratch
 orca_pane_key=$4
 terminal=$3
 harness=claude
+kind=scout
 EOF
 }
 
@@ -1453,7 +1454,7 @@ orca_stale_handle_recovery_rejects_disconnected_and_unresolved_candidates() {
 }
 
 orca_terminal_metadata_update_uses_shared_lock() {
-  local state meta holder setter pr_writer
+  local state meta holder setter pr_writer x_writer promote_writer
   orca_case recovery-meta-lock
   state="$CASE_DIR/state"
   meta="$state/recoverlock.meta"
@@ -1470,22 +1471,90 @@ orca_terminal_metadata_update_uses_shared_lock() {
   while [ ! -f "$CASE_DIR/locked" ]; do sleep 0.01; done
   PATH="$FB:$PATH" FM_STATE_OVERRIDE="$state" bash -c '
     . "$0/bin/backends/orca.sh"
-    fm_backend_orca_meta_set_terminal "$1" term-new
+    fm_backend_orca_meta_set_terminal "$1" term-old repo::/scratch \
+      11111111-1111-4111-8111-111111111111:22222222-2222-4222-8222-222222222222 term-new
   ' "$ROOT" "$meta" &
   setter=$!
   FM_ROOT_OVERRIDE="$ROOT" FM_STATE_OVERRIDE="$state" \
     "$ROOT/bin/fm-pr-check.sh" recoverlock https://github.com/example/repo/pull/1 >/dev/null &
   pr_writer=$!
+  FM_STATE_OVERRIDE="$state" bash -c '
+    . "$0/bin/fm-x-lib.sh"
+    fmx_meta_link_set "$1" request-1 1
+  ' "$ROOT" "$meta" &
+  x_writer=$!
+  FM_ROOT_OVERRIDE="$ROOT" FM_STATE_OVERRIDE="$state" \
+    "$ROOT/bin/fm-promote.sh" recoverlock >/dev/null 2>&1 &
+  promote_writer=$!
   sleep 0.05
   kill -0 "$setter" 2>/dev/null || fail "terminal metadata update did not wait for the shared lock"
   kill -0 "$pr_writer" 2>/dev/null || fail "PR metadata append did not wait for the shared lock"
+  kill -0 "$x_writer" 2>/dev/null || fail "X metadata rewrite did not wait for the shared lock"
+  kill -0 "$promote_writer" 2>/dev/null || fail "promotion metadata rewrite did not wait for the shared lock"
   : > "$CASE_DIR/release"
   wait "$holder" || fail "metadata lock holder failed"
   wait "$setter" || fail "terminal metadata update failed after lock release"
   wait "$pr_writer" || fail "PR metadata append failed after lock release"
+  wait "$x_writer" || fail "X metadata rewrite failed after lock release"
+  wait "$promote_writer" || fail "promotion metadata rewrite failed after lock release"
   assert_grep 'terminal=term-new' "$meta" "locked metadata update did not replace the terminal"
   assert_grep 'pr=https://github.com/example/repo/pull/1' "$meta" "locked metadata update lost an unrelated append"
+  assert_grep 'x_request=request-1' "$meta" "locked metadata update lost X metadata"
+  assert_grep 'kind=ship' "$meta" "locked metadata update lost promotion metadata"
   pass "orca_terminal_metadata_update_uses_shared_lock"
+}
+
+orca_terminal_metadata_cas_rejects_reused_task() {
+  local state meta status
+  orca_case recovery-meta-cas
+  state="$CASE_DIR/state"
+  meta="$state/recovercas.meta"
+  orca_recovery_meta "$state" recovercas term-replacement \
+    33333333-3333-4333-8333-333333333333:44444444-4444-4444-8444-444444444444
+  sed -i.bak 's#orca_worktree_id=repo::/scratch#orca_worktree_id=repo::/replacement#' "$meta"
+  rm -f "$meta.bak"
+  if FM_STATE_OVERRIDE="$state" bash -c '
+    . "$0/bin/backends/orca.sh"
+    fm_backend_orca_meta_set_terminal "$1" term-old repo::/scratch \
+      11111111-1111-4111-8111-111111111111:22222222-2222-4222-8222-222222222222 term-new
+  ' "$ROOT" "$meta"; then status=0; else status=$?; fi
+  [ "$status" -ne 0 ] || fail "terminal metadata CAS accepted a replacement task identity"
+  assert_grep 'terminal=term-replacement' "$meta" "terminal metadata CAS overwrote a replacement task"
+  assert_grep 'orca_worktree_id=repo::/replacement' "$meta" "terminal metadata CAS changed replacement worktree identity"
+  pass "orca_terminal_metadata_cas_rejects_reused_task"
+}
+
+orca_terminal_metadata_delete_prevents_resurrection() {
+  local state meta holder setter status
+  orca_case recovery-meta-delete
+  state="$CASE_DIR/state"
+  meta="$state/recoverdelete.meta"
+  orca_recovery_meta "$state" recoverdelete term-old \
+    11111111-1111-4111-8111-111111111111:22222222-2222-4222-8222-222222222222
+  FM_STATE_OVERRIDE="$state" bash -c '
+    . "$0/bin/fm-meta-lib.sh"
+    fm_meta_lock_acquire "$1"
+    : > "$2"
+    while [ ! -f "$3" ]; do sleep 0.01; done
+    rm -f "$1"
+    fm_meta_lock_release "$1"
+  ' "$ROOT" "$meta" "$CASE_DIR/locked" "$CASE_DIR/delete" &
+  holder=$!
+  while [ ! -f "$CASE_DIR/locked" ]; do sleep 0.01; done
+  FM_STATE_OVERRIDE="$state" bash -c '
+    . "$0/bin/backends/orca.sh"
+    fm_backend_orca_meta_set_terminal "$1" term-old repo::/scratch \
+      11111111-1111-4111-8111-111111111111:22222222-2222-4222-8222-222222222222 term-new
+  ' "$ROOT" "$meta" &
+  setter=$!
+  sleep 0.05
+  kill -0 "$setter" 2>/dev/null || fail "terminal metadata CAS did not wait for teardown deletion"
+  : > "$CASE_DIR/delete"
+  wait "$holder" || fail "teardown metadata deletion failed"
+  if wait "$setter"; then status=0; else status=$?; fi
+  [ "$status" -ne 0 ] || fail "terminal metadata CAS succeeded after teardown deletion"
+  assert_absent "$meta" "terminal metadata CAS resurrected a torn-down task"
+  pass "orca_terminal_metadata_delete_prevents_resurrection"
 }
 
 orca_recovery_triggers_only_for_stale_and_requires_new_metadata() {
@@ -1682,6 +1751,8 @@ orca_stale_handle_recovery_adopts_one_connected_match
 orca_stale_handle_recovery_rejects_zero_and_duplicate_matches
 orca_stale_handle_recovery_rejects_disconnected_and_unresolved_candidates
 orca_terminal_metadata_update_uses_shared_lock
+orca_terminal_metadata_cas_rejects_reused_task
+orca_terminal_metadata_delete_prevents_resurrection
 orca_recovery_triggers_only_for_stale_and_requires_new_metadata
 orca_pane_key_validation_is_strict
 orca_snapshot_selects_only_recorded_worktree_and_matching_agent
