@@ -215,7 +215,7 @@ P1 therefore maps only these observed shapes:
 
 - Exact unique matched agent state `working` becomes semantic `busy` and liveness `alive`.
 - Exact unique matched agent state `done` becomes semantic `idle` and liveness `alive`.
-- No matching agent in the exact worktree, while the exact terminal remains connected and writable, becomes liveness `dead`.
+- An empty `agents[]` in the exact worktree after clean agent exit, while the exact terminal remains connected and writable, becomes liveness `dead`; a nonempty inventory without the recorded pane remains `unknown`.
 - `ok:false`, malformed JSON, command failure, cross-worktree identity, `pty:` placeholders, duplicate worktrees, duplicate agents, disconnected or non-writable terminals, and unknown states remain `unknown`.
 
 The normalized snapshot parser lives in `bin/backends/orca.sh` and is reached only through `bin/fm-backend.sh`.

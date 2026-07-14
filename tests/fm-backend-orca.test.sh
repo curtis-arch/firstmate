@@ -451,11 +451,10 @@ test_spawn_preserves_orca_metadata_when_pathless_worktree_cleanup_fails() {
   printf '{"ok":true,"result":{"worktree":{"id":"wt-pathless-cleanup"}}}\n' > "$RESP/3.out"
   printf '{"ok":false,"error":{"code":"worktree_not_removed","message":"worktree not removed"}}\n' > "$RESP/4.out"
   printf '{"ok":false,"error":{"code":"worktree_not_removed","message":"worktree not removed"}}\n' > "$RESP/5.out"
-  out=$( PATH="$FB:$PATH" FM_ORCA_LOG="$LOG" FM_ORCA_RESPONSES="$RESP" \
+  if out=$( PATH="$FB:$PATH" FM_ORCA_LOG="$LOG" FM_ORCA_RESPONSES="$RESP" \
     FM_ROOT_OVERRIDE="$ROOT" FM_STATE_OVERRIDE="$state" FM_DATA_OVERRIDE="$data" FM_CONFIG_OVERRIDE="$config" \
     FM_PROJECTS_OVERRIDE="$TMP_ROOT/unused-projects" FM_SPAWN_NO_GUARD=1 \
-    "$ROOT/bin/fm-spawn.sh" "$id" "$proj" claude --backend orca 2>&1 )
-  status=$?
+    "$ROOT/bin/fm-spawn.sh" "$id" "$proj" claude --backend orca 2>&1 ); then status=0; else status=$?; fi
   [ "$status" -ne 0 ] || fail "Orca spawn should fail when path parsing and cleanup fail"
   assert_contains "$out" "orca worktree create did not return a path" \
     "pathless worktree failure should explain the missing path"
@@ -508,6 +507,35 @@ test_spawn_writes_orca_metadata_and_launches_harness() {
     "spawn did not send the selected harness launch command through Orca"
   rm -rf "/tmp/fm-$id"
   pass "fm-spawn.sh --backend orca: reuses implicit terminal, records metadata, launches harness"
+}
+
+test_spawn_refuses_existing_metadata_without_overwrite() {
+  local proj wt data state config id out status
+  id="orcareusez2"
+  proj="$TMP_ROOT/reuse-project"
+  wt="$TMP_ROOT/reuse-wt"
+  data="$TMP_ROOT/reuse-data"
+  state="$TMP_ROOT/reuse-state"
+  config="$TMP_ROOT/reuse-config"
+  fm_git_worktree "$proj" "$wt" "fm/$id"
+  mkdir -p "$data/$id" "$state" "$config"
+  printf 'brief\n' > "$data/$id/brief.md"
+  printf 'window=fm-replacement\nworktree=/replacement\nproject=/replacement\nterminal=term-replacement\n' > "$state/$id.meta"
+  touch "$state/.last-watcher-beat"
+  orca_case spawn-reuse
+  printf '1\n' > "$RESP/1.exit"
+  printf '{"ok":true,"result":{"repo":{"id":"repo-reuse"}}}\n' > "$RESP/2.out"
+  printf '{"ok":true,"result":{"worktree":{"id":"wt-reuse","path":"%s"},"terminal":{"handle":"term-reuse","paneKey":"11111111-1111-4111-8111-111111111111:22222222-2222-4222-8222-222222222222"}}}\n' "$wt" > "$RESP/3.out"
+  if out=$( PATH="$FB:$PATH" FM_ORCA_LOG="$LOG" FM_ORCA_RESPONSES="$RESP" \
+    FM_ROOT_OVERRIDE="$ROOT" FM_STATE_OVERRIDE="$state" FM_DATA_OVERRIDE="$data" FM_CONFIG_OVERRIDE="$config" \
+    FM_PROJECTS_OVERRIDE="$TMP_ROOT/unused-projects" FM_SPAWN_NO_GUARD=1 \
+    "$ROOT/bin/fm-spawn.sh" "$id" "$proj" claude --backend orca 2>&1 ); then status=0; else status=$?; fi
+  [ "$status" -ne 0 ] || fail "same-ID Orca spawn should refuse existing metadata"
+  assert_contains "$out" "task metadata already exists" "same-ID spawn did not explain the metadata refusal"
+  assert_grep 'terminal=term-replacement' "$state/$id.meta" "same-ID spawn overwrote replacement metadata"
+  assert_no_grep 'orca_worktree_id=wt-reuse' "$state/$id.meta" "same-ID spawn installed its new lifecycle identity"
+  rm -rf "/tmp/fm-$id"
+  pass "fm-spawn.sh --backend orca: refuses same-ID metadata replacement"
 }
 
 test_spawn_refuses_orca_secondmate_before_home_mutation() {
@@ -1557,6 +1585,61 @@ orca_terminal_metadata_delete_prevents_resurrection() {
   pass "orca_terminal_metadata_delete_prevents_resurrection"
 }
 
+pr_check_does_not_resurrect_deleted_metadata() {
+  local state meta writer status
+  orca_case pr-check-meta-delete
+  state="$CASE_DIR/state"
+  meta="$state/prdelete.meta"
+  orca_recovery_meta "$state" prdelete term-old \
+    11111111-1111-4111-8111-111111111111:22222222-2222-4222-8222-222222222222
+  mkdir -p "$CASE_DIR/worktree"
+  printf 'worktree=%s\n' "$CASE_DIR/worktree" >> "$meta"
+  cat > "$FB/gh" <<'SH'
+#!/usr/bin/env bash
+: > "$FM_TEST_GH_READY"
+while [ ! -f "$FM_TEST_GH_RELEASE" ]; do sleep 0.01; done
+printf 'deadbeef\n'
+SH
+  chmod +x "$FB/gh"
+  PATH="$FB:$PATH" FM_TEST_GH_READY="$CASE_DIR/gh-ready" FM_TEST_GH_RELEASE="$CASE_DIR/gh-release" \
+    FM_ROOT_OVERRIDE="$ROOT" FM_STATE_OVERRIDE="$state" \
+    "$ROOT/bin/fm-pr-check.sh" prdelete https://github.com/example/repo/pull/2 >/dev/null 2>&1 &
+  writer=$!
+  for _ in $(seq 1 200); do
+    [ -f "$CASE_DIR/gh-ready" ] && break
+    kill -0 "$writer" 2>/dev/null || fail "PR metadata writer exited before its final identity check"
+    sleep 0.01
+  done
+  [ -f "$CASE_DIR/gh-ready" ] || fail "PR metadata writer did not reach the remote-head lookup"
+  FM_STATE_OVERRIDE="$state" bash -c '
+    . "$0/bin/fm-meta-lib.sh"
+    identity=$(fm_meta_identity "$1")
+    fm_meta_remove_if_identity "$1" "$identity"
+  ' "$ROOT" "$meta" || fail "metadata deletion failed"
+  : > "$CASE_DIR/gh-release"
+  if wait "$writer"; then status=0; else status=$?; fi
+  [ "$status" -ne 0 ] || fail "PR metadata writer accepted a deleted task"
+  assert_absent "$meta" "PR metadata writer resurrected a deleted task"
+  assert_absent "$state/prdelete.check.sh" "PR metadata writer armed an orphan poll"
+  pass "fm-pr-check: deleted metadata stays deleted and unarmed"
+}
+
+meta_compare_delete_rejects_replacement_identity() {
+  local state meta identity status
+  orca_case teardown-meta-cas
+  state="$CASE_DIR/state"
+  meta="$state/teardowncas.meta"
+  orca_recovery_meta "$state" teardowncas term-old \
+    11111111-1111-4111-8111-111111111111:22222222-2222-4222-8222-222222222222
+  identity=$(FM_STATE_OVERRIDE="$state" bash -c '. "$0/bin/fm-meta-lib.sh"; fm_meta_identity "$1"' "$ROOT" "$meta")
+  printf 'window=fm-replacement\nworktree=/replacement\nproject=/replacement\nterminal=term-replacement\n' > "$meta"
+  if FM_STATE_OVERRIDE="$state" bash -c '. "$0/bin/fm-meta-lib.sh"; fm_meta_remove_if_identity "$1" "$2"' \
+    "$ROOT" "$meta" "$identity"; then status=0; else status=$?; fi
+  [ "$status" -ne 0 ] || fail "metadata compare-delete accepted a replacement task"
+  assert_grep 'terminal=term-replacement' "$meta" "metadata compare-delete removed the replacement task"
+  pass "teardown metadata compare-delete rejects replacement identity"
+}
+
 orca_recovery_triggers_only_for_stale_and_requires_new_metadata() {
   local state meta out status log_text
   orca_case recovery-runtime-unavailable
@@ -1753,6 +1836,8 @@ orca_stale_handle_recovery_rejects_disconnected_and_unresolved_candidates
 orca_terminal_metadata_update_uses_shared_lock
 orca_terminal_metadata_cas_rejects_reused_task
 orca_terminal_metadata_delete_prevents_resurrection
+pr_check_does_not_resurrect_deleted_metadata
+meta_compare_delete_rejects_replacement_identity
 orca_recovery_triggers_only_for_stale_and_requires_new_metadata
 orca_pane_key_validation_is_strict
 orca_snapshot_selects_only_recorded_worktree_and_matching_agent
@@ -1766,6 +1851,7 @@ test_worktree_and_terminal_helpers_parse_json
 test_worktree_create_removes_worktree_when_path_missing
 test_spawn_preserves_orca_metadata_when_pathless_worktree_cleanup_fails
 test_spawn_writes_orca_metadata_and_launches_harness
+test_spawn_refuses_existing_metadata_without_overwrite
 test_spawn_refuses_orca_secondmate_before_home_mutation
 test_spawn_refuses_orca_when_runtime_not_ready
 test_spawn_refuses_orca_nonisolated_worktree
