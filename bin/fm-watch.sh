@@ -267,11 +267,13 @@ recorded_windows() {
 # an affirmative present result clears it, while unknown preserves it and takes
 # no action. This makes runtime errors and transient outages fail closed.
 detect_possible_external_destruction() {
-  local meta backend task worktree_id worktree project marker verdict reason
+  local meta backend task lifecycle worktree_id worktree project marker verdict reason
   for meta in "$STATE"/*.meta; do
     [ -e "$meta" ] || continue
     backend=$(fm_backend_of_meta "$meta")
     [ "$backend" = orca ] || continue
+    lifecycle=$(fm_meta_get "$meta" lifecycle)
+    [ -z "$lifecycle" ] || continue
     task=$(basename "$meta" .meta)
     worktree_id=$(fm_meta_get "$meta" orca_worktree_id)
     [ -n "$worktree_id" ] || continue

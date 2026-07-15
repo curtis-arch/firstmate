@@ -119,12 +119,17 @@ META="$STATE/$ID.meta"
 META_IDENTITY=$(fm_meta_identity "$META") || { echo "error: could not capture task identity from $META" >&2; exit 1; }
 TEARDOWN_OWNER=
 TEARDOWN_IDENTITY=
+TEARDOWN_MUTATION_STARTED=0
 PARENT_ENDPOINT_QUIESCED=0
 
 release_teardown_claim() {
-  [ -z "$TEARDOWN_OWNER" ] || fm_meta_release_teardown "$META" "$TEARDOWN_OWNER" 2>/dev/null || true
+  [ "$TEARDOWN_MUTATION_STARTED" = 1 ] || [ -z "$TEARDOWN_OWNER" ] || fm_meta_release_teardown "$META" "$TEARDOWN_OWNER" 2>/dev/null || true
 }
 trap release_teardown_claim EXIT
+
+teardown_begin_mutation() {
+  TEARDOWN_MUTATION_STARTED=1
+}
 WT=$(grep '^worktree=' "$META" | cut -d= -f2-)
 T=$(grep '^window=' "$META" | cut -d= -f2-)
 PROJ=$(grep '^project=' "$META" | cut -d= -f2-)
@@ -994,7 +999,7 @@ cleanup_firstmate_home_children() {
   local home=$1 sub_state child_meta child_identity child_claim status=0 i
   # Bash 3.2 with set -u treats a declared-but-empty array expansion as
   # unbound, so keep an unused sentinel at index 0 and iterate from index 1.
-  local -a child_metas=('') child_claims=('')
+  local -a child_metas=('') child_claims=('') child_mutated=('')
   sub_state="$home/state"
   [ -d "$sub_state" ] || return 0
   for child_meta in "$sub_state"/*.meta; do
@@ -1003,9 +1008,11 @@ cleanup_firstmate_home_children() {
     child_claim=$(fm_meta_claim_teardown "$child_meta" "$child_identity" "$TEARDOWN_OWNER" "$TEARDOWN_RESUME_TOKEN") || { status=1; break; }
     child_metas+=("$child_meta")
     child_claims+=("$child_claim")
+    child_mutated+=(0)
   done
   if [ "$status" -eq 0 ]; then
     for ((i=1; i<${#child_metas[@]}; i++)); do
+      child_mutated[$i]=1
       if cleanup_claimed_firstmate_child "$home" "${child_metas[$i]}" "${child_claims[$i]}"; then
         :
       else
@@ -1014,8 +1021,8 @@ cleanup_firstmate_home_children() {
       fi
     done
   fi
-  for child_meta in "${child_metas[@]}"; do
-    [ -z "$child_meta" ] || fm_meta_release_teardown "$child_meta" "$TEARDOWN_OWNER" 2>/dev/null || true
+  for ((i=1; i<${#child_metas[@]}; i++)); do
+    [ "${child_mutated[$i]}" = 1 ] || fm_meta_release_teardown "${child_metas[$i]}" "$TEARDOWN_OWNER" 2>/dev/null || true
   done
   return "$status"
 }
@@ -1085,6 +1092,7 @@ TEARDOWN_IDENTITY=$(fm_meta_claim_teardown "$META" "$META_IDENTITY" "$TEARDOWN_O
 
 if [ "$KIND" = secondmate ] && [ "$FORCE" = "--force" ]; then
   validate_firstmate_home_children_removal "$HOME_PATH" || exit 1
+  teardown_begin_mutation
   [ -z "$T" ] || fm_backend_kill "$BACKEND" "$T" "$(meta_value "$META" zellij_tab_id)" "fm-$ID" 2>/dev/null || true
   if [ -n "$T" ] && fm_backend_target_exists "$BACKEND" "$T" "fm-$ID" 2>/dev/null; then
     echo "error: secondmate endpoint $T remained live; refusing child cleanup" >&2
@@ -1106,6 +1114,8 @@ if [ -d "$WT" ] && [ "$FORCE" != "--force" ]; then
     fi
   fi
 fi
+
+[ "$TEARDOWN_MUTATION_STARTED" = 1 ] || teardown_begin_mutation
 
 if [ "$KIND" = secondmate ] && [ "$FORCE" = "--force" ]; then
   cleanup_firstmate_home_children "$HOME_PATH"

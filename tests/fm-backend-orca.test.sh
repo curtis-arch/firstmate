@@ -872,6 +872,23 @@ test_crew_state_surfaces_possible_external_destruction() {
   pass "fm-crew-state: confidently absent Orca worktree is a distinct recoverable state"
 }
 
+test_crew_state_skips_inactive_orca_metadata() {
+  local state id out
+  id="orcainactivez4"
+  state="$TMP_ROOT/inactive-state"; mkdir -p "$state"
+  fm_write_meta "$state/$id.meta" \
+    "window=fm-$id" "terminal=term-inactive" "worktree=$TMP_ROOT/absent-inactive-worktree" \
+    "project=$TMP_ROOT/project" "harness=claude" "kind=ship" "backend=orca" \
+    "orca_worktree_id=wt-inactive" "lifecycle=teardown:owner"
+  orca_case crew-state-inactive
+  out=$( PATH="$FB:$PATH" FM_ORCA_LOG="$LOG" FM_ORCA_RESPONSES="$RESP" \
+    FM_ROOT_OVERRIDE="$ROOT" FM_STATE_OVERRIDE="$state" "$ROOT/bin/fm-crew-state.sh" "$id" )
+  assert_contains "$out" "state: unknown" "inactive crew-state should not remain routable"
+  assert_contains "$out" "task lifecycle inactive" "inactive crew-state should explain its lifecycle"
+  [ ! -s "$LOG" ] || fail "inactive crew-state probed Orca and could misclassify teardown as external destruction"
+  pass "fm-crew-state: inactive Orca metadata bypasses external-destruction probes"
+}
+
 test_target_exists_rejects_orca_error_json() {
   local status state meta
   orca_case target-exists-error-json
@@ -1022,6 +1039,8 @@ test_teardown_preserves_metadata_when_orca_remove_error_json() {
   [ "$rc" -ne 0 ] || fail "Orca teardown should fail when worktree removal returns ok:false JSON"
   assert_contains "$out" "worktree not removed" "teardown should surface the Orca removal error"
   assert_present "$state/$id.meta" "failed Orca removal should preserve task metadata"
+  assert_grep 'lifecycle=teardown:' "$state/$id.meta" \
+    "failed Orca removal released teardown ownership after destructive work began"
   pass "fm-teardown.sh backend=orca: preserves metadata on remove ok:false JSON"
 }
 
@@ -1051,7 +1070,49 @@ test_scout_teardown_refuses_orca_missing_report_when_path_missing() {
   assert_contains "$out" "has no report" "Orca scout teardown should explain the missing report"
   [ ! -s "$LOG" ] || fail "refused Orca scout teardown should not close terminals or remove worktrees"
   assert_present "$state/$id.meta" "refused Orca scout teardown should preserve metadata"
+  assert_no_grep 'lifecycle=' "$state/$id.meta" \
+    "pre-mutation teardown refusal should release teardown ownership"
   pass "fm-teardown.sh backend=orca: scout report gate precedes pathless helper cleanup"
+}
+
+test_secondmate_failed_child_cleanup_preserves_claims() {
+  local home subhome child_id neutral out rc parent_meta child_meta
+  home="$TMP_ROOT/orca-child-failure-parent"
+  subhome="$TMP_ROOT/orca-child-failure-secondmate"
+  child_id="orcachildfailz7"
+  parent_meta="$home/state/domain.meta"
+  child_meta="$subhome/state/$child_id.meta"
+  mkdir -p "$home/state" "$home/data" "$subhome/state" "$subhome/projects" "$subhome/bin" "$subhome/data" "$subhome/config"
+  printf 'domain\n' > "$subhome/.fm-secondmate-home"
+  printf '# Firstmate\n' > "$subhome/AGENTS.md"
+  fm_write_meta "$parent_meta" \
+    "window=firstmate:fm-domain" "worktree=$subhome" "project=$subhome" \
+    "harness=echo" "kind=secondmate" "mode=secondmate" "yolo=off" \
+    "home=$subhome" "projects=alpha"
+  printf '%s\n' "- domain - Orca child cleanup failure (home: $subhome; scope: orca cleanup; projects: alpha; added 2026-07-15)" \
+    > "$home/data/secondmates.md"
+  fm_write_meta "$child_meta" \
+    "window=fm-$child_id" "terminal=term-child-failure" "project=$subhome/projects/alpha" \
+    "harness=claude" "kind=ship" "mode=no-mistakes" "yolo=off" \
+    "backend=orca" "orca_worktree_id=wt-child-failure"
+  orca_case secondmate-child-cleanup-failure
+  printf '{"ok":false,"error":{"code":"worktree_not_removed","message":"child worktree not removed"}}\n' > "$RESP/2.out"
+  add_tmux_fake "$FB"
+  neutral=$(neutral_fm_root "$CASE_DIR/neutral")
+
+  set +e
+  out=$( PATH="$FB:$PATH" FM_ORCA_LOG="$LOG" FM_ORCA_RESPONSES="$RESP" \
+    FM_ROOT_OVERRIDE="$neutral" FM_HOME="$home" "$ROOT/bin/fm-teardown.sh" domain --force 2>&1 )
+  rc=$?
+  set -e
+
+  [ "$rc" -ne 0 ] || fail "forced secondmate teardown should fail when child worktree removal fails"
+  assert_contains "$out" "child worktree not removed" "child cleanup failure was not surfaced"
+  assert_grep 'lifecycle=teardown:' "$parent_meta" \
+    "failed child cleanup released parent teardown ownership"
+  assert_grep 'lifecycle=teardown:' "$child_meta" \
+    "failed child cleanup released the mutated child's teardown ownership"
+  pass "fm-teardown.sh --force: failed child cleanup preserves parent and child claims"
 }
 
 test_ship_teardown_refuses_orca_missing_worktree_path() {
@@ -2131,12 +2192,14 @@ test_spawn_refuses_unwritable_metadata_before_orca_mutation
 test_peek_send_and_crew_state_route_through_orca_meta
 test_peek_and_crew_state_fail_closed_on_orca_error_json
 test_crew_state_surfaces_possible_external_destruction
+test_crew_state_skips_inactive_orca_metadata
 test_target_exists_rejects_orca_error_json
 test_scout_teardown_removes_orca_worktree_via_helper
 test_scout_teardown_refuses_orca_id_path_mismatch
 test_teardown_removes_orca_worktree_when_path_missing
 test_teardown_preserves_metadata_when_orca_remove_error_json
 test_scout_teardown_refuses_orca_missing_report_when_path_missing
+test_secondmate_failed_child_cleanup_preserves_claims
 test_ship_teardown_refuses_orca_missing_worktree_path
 test_ship_teardown_removes_orca_worktree_when_id_path_matches
 test_ship_teardown_refuses_orca_unresolvable_worktree_id

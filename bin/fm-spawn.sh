@@ -236,10 +236,13 @@ parse_orca_worktree_result() {
 }
 
 orca_spawn_abort_cleanup() {
-  local status=$? meta_tmp current_lifecycle
+  local status=$? meta_tmp current_lifecycle replacement_target_closed=1
   if [ "$SPAWN_ABORT_TARGET_CLEANUP" = 1 ]; then
     SPAWN_ABORT_TARGET_CLEANUP=0
-    fm_backend_kill "$SPAWN_ABORT_BACKEND" "$SPAWN_ABORT_TARGET" 2>/dev/null || true
+    fm_backend_kill "$SPAWN_ABORT_BACKEND" "$SPAWN_ABORT_TARGET" "" "$W" 2>/dev/null || true
+    if fm_backend_target_exists "$SPAWN_ABORT_BACKEND" "$SPAWN_ABORT_TARGET" "$W" 2>/dev/null; then
+      replacement_target_closed=0
+    fi
   fi
   if [ "$ORCA_ABORT_CLEANUP" = 1 ]; then
     ORCA_ABORT_CLEANUP=0
@@ -280,8 +283,10 @@ orca_spawn_abort_cleanup() {
   fi
   if [ "$SPAWN_REPLACEMENT_ACTIVE" = 1 ]; then
     current_lifecycle=$(fm_meta_value_unlocked "$SPAWN_META" lifecycle 2>/dev/null || true)
-    if [ "$current_lifecycle" = "$SPAWN_REPLACEMENT_LIFECYCLE" ]; then
-      rm -f "$SPAWN_META"
+    if [ "$current_lifecycle" = "$SPAWN_REPLACEMENT_LIFECYCLE" ] && [ "$replacement_target_closed" = 1 ]; then
+      rm -f "$SPAWN_META" || true
+    elif [ "$current_lifecycle" = "$SPAWN_REPLACEMENT_LIFECYCLE" ]; then
+      echo "warning: preserved replacement ownership for $ID because endpoint $SPAWN_ABORT_TARGET could not be verified closed" >&2
     fi
     SPAWN_REPLACEMENT_ACTIVE=0
   fi
@@ -312,6 +317,18 @@ spawn_track_replacement_target() {  # <backend> <target>
   SPAWN_ABORT_BACKEND=$1
   SPAWN_ABORT_TARGET=$2
   SPAWN_ABORT_TARGET_CLEANUP=1
+}
+
+spawn_commit_replacement() {
+  local current_lifecycle tmp
+  [ "$SPAWN_REPLACEMENT_ACTIVE" = 1 ] || return 1
+  current_lifecycle=$(fm_meta_value_unlocked "$SPAWN_META" lifecycle 2>/dev/null || true)
+  [ "$current_lifecycle" = "$SPAWN_REPLACEMENT_LIFECYCLE" ] || return 1
+  tmp=$(mktemp "$STATE/.${ID}.activate.XXXXXX") || return 1
+  if ! grep -v '^lifecycle=' "$SPAWN_META" > "$tmp" || ! mv "$tmp" "$SPAWN_META"; then
+    rm -f "$tmp"
+    return 1
+  fi
 }
 
 # Batch dispatch (see header): when the first positional is an `id=repo` pair, treat every
@@ -1151,6 +1168,9 @@ META_TMP=$(mktemp "$STATE/.${ID}.meta.XXXXXX")
     echo "home=$PROJ_ABS"
     echo "projects=$SECONDMATE_PROJECTS"
   fi
+  if [ "$KIND" = secondmate ] && [ -n "${FM_SPAWN_REPLACE_GENERATION:-}" ]; then
+    echo "lifecycle=$SPAWN_REPLACEMENT_LIFECYCLE"
+  fi
 } > "$META_TMP"
 if [ "$KIND" = secondmate ] && [ -n "${FM_SPAWN_REPLACE_GENERATION:-}" ]; then
   current_generation=$(fm_meta_value_unlocked "$SPAWN_META" generation 2>/dev/null || true)
@@ -1171,11 +1191,12 @@ if ! mv "$META_TMP" "$SPAWN_META"; then
   echo "error: could not record task metadata for $ID at $SPAWN_META" >&2
   exit 1
 fi
-SPAWN_ABORT_TARGET_CLEANUP=0
-SPAWN_REPLACEMENT_ACTIVE=0
-fm_meta_lock_release "$SPAWN_META"
-SPAWN_META_LOCKED=0
-[ "$BACKEND" = orca ] && ORCA_ABORT_CLEANUP=0
+if [ "$SPAWN_REPLACEMENT_ACTIVE" != 1 ]; then
+  SPAWN_ABORT_TARGET_CLEANUP=0
+  fm_meta_lock_release "$SPAWN_META"
+  SPAWN_META_LOCKED=0
+  [ "$BACKEND" = orca ] && ORCA_ABORT_CLEANUP=0
+fi
 
 sq_brief=$(shell_quote "$BRIEF")
 sq_turnend=$(shell_quote "$TURNEND")
@@ -1203,5 +1224,16 @@ sleep 0.3
 spawn_send_literal "$T" "$LAUNCH"
 sleep 0.3
 spawn_send_key "$T" Enter
+
+if [ "$SPAWN_REPLACEMENT_ACTIVE" = 1 ]; then
+  spawn_commit_replacement || {
+    echo "error: could not activate secondmate replacement metadata for $ID" >&2
+    exit 1
+  }
+  SPAWN_ABORT_TARGET_CLEANUP=0
+  SPAWN_REPLACEMENT_ACTIVE=0
+  fm_meta_lock_release "$SPAWN_META"
+  SPAWN_META_LOCKED=0
+fi
 
 echo "spawned $ID harness=$HARNESS kind=$KIND mode=$MODE yolo=$YOLO window=$META_WINDOW worktree=$WT"

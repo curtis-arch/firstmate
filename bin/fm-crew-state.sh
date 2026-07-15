@@ -95,6 +95,9 @@ KIND=$(meta_value kind)
 [ -n "$KIND" ] || KIND=ship
 TASK_BACKEND=$(fm_backend_of_meta "$META")
 BACKEND_TARGET=$(fm_backend_target_of_meta "$META")
+LIFECYCLE=$(meta_value lifecycle)
+
+[ -z "$LIFECYCLE" ] || emit unknown none "task lifecycle inactive: $LIFECYCLE"
 
 # Orca owns its task worktree, so its exact runtime absence signal precedes the
 # local-path and terminal checks. A missing PTY alone is deliberately ignored.
