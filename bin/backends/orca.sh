@@ -50,6 +50,49 @@ process.exit(1);
 '
 }
 
+# Classify one recorded Orca worktree without consulting its terminal endpoint.
+# `possible-external-destruction` requires both a reachable/ready runtime and
+# Orca's exact worktree_not_found error for the recorded id. Every command
+# failure, malformed or unverified shape, runtime outage, and other error stays
+# unknown. This separation is important on Orca 1.4.141, where daemon
+# replacement can remove a PTY without writing task status: an endpoint-gone
+# result is never evidence that the worktree itself was destroyed.
+fm_backend_orca_worktree_presence() {  # <recorded-worktree-id> -> present|possible-external-destruction|unknown
+  local worktree_id=${1:-} status_out show_out
+  [ -n "$worktree_id" ] || { printf 'unknown'; return 0; }
+  fm_backend_orca_tool_check >/dev/null 2>&1 || { printf 'unknown'; return 0; }
+  status_out=$(orca status --json 2>/dev/null) || { printf 'unknown'; return 0; }
+  printf '%s' "$status_out" | node -e '
+const fs = require("fs");
+let data;
+try { data = JSON.parse(fs.readFileSync(0, "utf8")); } catch (_) { process.exit(1); }
+if (data.ok === false) process.exit(1);
+const r = data.result || {};
+const runtime = r.runtime || {};
+const reachable = runtime.reachable ?? r.runtimeReachable;
+const state = runtime.state || r.runtimeState || "";
+if (reachable !== true || state !== "ready") process.exit(1);
+' >/dev/null 2>&1 || { printf 'unknown'; return 0; }
+  show_out=$(orca worktree show --worktree "id:$worktree_id" --json 2>/dev/null) || true
+  printf '%s' "$show_out" | node -e '
+const fs = require("fs");
+const expected = process.argv[1];
+let data;
+try { data = JSON.parse(fs.readFileSync(0, "utf8")); } catch (_) { process.stdout.write("unknown"); process.exit(0); }
+if (data.ok === false) {
+  const code = data.error && data.error.code;
+  process.stdout.write(code === "worktree_not_found" ? "possible-external-destruction" : "unknown");
+  process.exit(0);
+}
+if (data.ok !== true || !data.result) { process.stdout.write("unknown"); process.exit(0); }
+const wt = data.result.worktree || data.result.item;
+if (!wt || typeof wt !== "object") { process.stdout.write("unknown"); process.exit(0); }
+const id = wt.id || wt.worktreeId;
+const path = wt.path || (wt.git && wt.git.path);
+process.stdout.write(id === expected && typeof path === "string" && path.length > 0 ? "present" : "unknown");
+' "$worktree_id" 2>/dev/null || printf 'unknown'
+}
+
 fm_backend_orca_json_get() {  # <field> ; fields: worktree-id worktree-path terminal-handle worktree-terminal-handle terminal-pane-key repo-id
   # Terminal handles are accepted only from verified terminal result shapes:
   # result.terminal or a root terminal object with .handle. Undocumented

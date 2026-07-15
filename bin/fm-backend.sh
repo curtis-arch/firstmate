@@ -375,7 +375,7 @@ fm_backend_meta_for_window() {  # <target> <state-dir>
 }
 
 fm_backend_orca_meta_for_target() {  # <terminal-handle>
-  local target=$1 meta backend terminal match= count=0
+  local target=$1 meta backend terminal match='' count=0
   for meta in "$FM_BACKEND_STATE_DIR"/*.meta; do
     [ -e "$meta" ] || continue
     backend=$(fm_meta_get "$meta" backend)
@@ -626,6 +626,19 @@ fm_backend_worktree_path() {  # <backend> <worktree-id>
   case "$backend" in
     orca) fm_backend_orca_worktree_path "$@" ;;
     *) echo "error: backend '$backend' does not own task worktrees" >&2; return 1 ;;
+  esac
+}
+
+# Read-only task-worktree presence taxonomy. Only Orca currently owns task
+# worktrees and exposes a verified absence signal; every other backend remains
+# unknown so its behavior and treehouse lifecycle are unchanged.
+fm_backend_worktree_presence() {  # <backend> <worktree-id>
+  local backend=$1
+  shift
+  fm_backend_source "$backend" || { printf 'unknown'; return 0; }
+  case "$backend" in
+    orca) fm_backend_orca_worktree_presence "$@" ;;
+    *) printf 'unknown' ;;
   esac
 }
 

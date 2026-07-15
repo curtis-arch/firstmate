@@ -245,6 +245,39 @@ recorded_windows() {
   done
 }
 
+# Surface a task-level Orca worktree disappearance independently of terminal
+# liveness. The marker suppresses repeats for the same recorded worktree id;
+# an affirmative present result clears it, while unknown preserves it and takes
+# no action. This makes runtime errors and transient outages fail closed.
+detect_possible_external_destruction() {
+  local meta backend task worktree_id worktree project marker verdict reason
+  for meta in "$STATE"/*.meta; do
+    [ -e "$meta" ] || continue
+    backend=$(fm_backend_of_meta "$meta")
+    [ "$backend" = orca ] || continue
+    task=$(basename "$meta" .meta)
+    worktree_id=$(fm_meta_get "$meta" orca_worktree_id)
+    [ -n "$worktree_id" ] || continue
+    marker="$STATE/.possible-external-destruction-$task"
+    verdict=$(fm_backend_worktree_presence orca "$worktree_id" 2>/dev/null)
+    case "$verdict" in
+      present)
+        rm -f "$marker"
+        ;;
+      possible-external-destruction)
+        [ "$(cat "$marker" 2>/dev/null || true)" = "$worktree_id" ] && continue
+        worktree=$(fm_meta_get "$meta" worktree)
+        project=$(fm_meta_get "$meta" project)
+        reason="possible-external-destruction: task=$task; Orca runtime reachable but recorded worktree=$worktree_id is absent; recovery: inspect task branch/ref (normally fm/$task), project=$project, and recorded path=$worktree before recovery or teardown; do not delete, recreate, reset, or discard automatically"
+        fm_wake_append possible-external-destruction "$task" "$reason" || exit 1
+        printf '%s' "$worktree_id" > "$marker"
+        wake "$reason"
+        ;;
+      *) : ;;
+    esac
+  done
+}
+
 # Exit reporting a wake. Consecutive heartbeats with no other wake in between
 # mean an idle fleet, so the heartbeat interval backs off exponentially
 # (base * 2^streak, capped at HEARTBEAT_MAX); any real wake resets the cadence.
@@ -632,6 +665,11 @@ while :; do
   # Liveness beacon for fm-guard.sh: a fresh mtime here means a watcher is
   # alive. Supervision scripts warn when this goes stale with tasks in flight.
   touch "$STATE/.last-watcher-beat"
+
+  # Task-worktree integrity is checked before endpoint staleness. Orca 1.4.141
+  # can lose a PTY during daemon replacement without a status write, and the
+  # endpoint disappearing is not itself proof of worktree destruction.
+  detect_possible_external_destruction
 
   # Slow per-task checks (firstmate writes these, e.g. a merged-PR poll).
   # Time-based via .last-check mtime so the cadence survives watcher restarts.

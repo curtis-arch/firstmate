@@ -36,7 +36,10 @@
 #      recorded backend's pane busy state, then the status log's last line only
 #      when its verb maps to a recognized run-state. Decision-only events such as
 #      `resolved` never become current state or detail.
-#   5. Missing meta or torn-down worktree: report unknown · none. If no run is
+#   5. A recorded Orca worktree that is exactly absent while its runtime is
+#      reachable reports possible-external-destruction · backend. Missing meta,
+#      an unknown probe, or an ordinarily torn-down worktree reports unknown ·
+#      none. If no run is
 #      attributed to this crew, a dead endpoint also reports unknown · none rather
 #      than trusting a stale status log.
 #
@@ -90,6 +93,18 @@ meta_value() {  # <key>
 WT=$(meta_value worktree)
 KIND=$(meta_value kind)
 [ -n "$KIND" ] || KIND=ship
+TASK_BACKEND=$(fm_backend_of_meta "$META")
+BACKEND_TARGET=$(fm_backend_target_of_meta "$META")
+
+# Orca owns its task worktree, so its exact runtime absence signal precedes the
+# local-path and terminal checks. A missing PTY alone is deliberately ignored.
+if [ "$TASK_BACKEND" = orca ]; then
+  ORCA_WORKTREE_ID=$(fm_meta_get "$META" orca_worktree_id)
+  ORCA_WORKTREE_PRESENCE=$(fm_backend_worktree_presence orca "$ORCA_WORKTREE_ID" 2>/dev/null)
+  if [ "$ORCA_WORKTREE_PRESENCE" = possible-external-destruction ]; then
+    emit possible-external-destruction backend "task $ID: Orca runtime reachable but recorded worktree $ORCA_WORKTREE_ID is absent; inspect the task branch/ref and recorded path $WT before recovery or teardown; do not delete, recreate, reset, or discard automatically"
+  fi
+fi
 
 # A torn-down (or never-created) worktree has no current state to read.
 if [ -z "$WT" ] || [ ! -d "$WT" ]; then
@@ -132,8 +147,6 @@ LOG_VERB=$(status_line_verb "$LOG_LINE")
 # state (e.g. done) instead of being masked as unknown. Backend-aware
 # (fm_backend_of_meta defaults absent backend= to tmux, the P1 contract): a
 # herdr task is read through fm_backend_capture instead of a bare tmux probe.
-TASK_BACKEND=$(fm_backend_of_meta "$META")
-BACKEND_TARGET=$(fm_backend_target_of_meta "$META")
 EXPECTED_LABEL="fm-$ID"
 pane_readable() {  # <target>
   case "$TASK_BACKEND" in

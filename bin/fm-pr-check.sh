@@ -41,10 +41,10 @@ if [ -z "$CURRENT_IDENTITY" ] || ! fm_meta_is_active_unlocked "$META" \
   META_STATUS=1
 else
   if ! grep -qxF "pr=$URL" "$META"; then
-    echo "pr=$URL" >> "$META" || META_STATUS=$?
+    echo "pr=$URL" >> "$META" || META_STATUS=1
   fi
   if [ "$META_STATUS" -eq 0 ] && [ -n "$PR_HEAD" ] && ! grep -qxF "pr_head=$PR_HEAD" "$META"; then
-    echo "pr_head=$PR_HEAD" >> "$META" || META_STATUS=$?
+    echo "pr_head=$PR_HEAD" >> "$META" || META_STATUS=1
   fi
 fi
 if [ "$META_STATUS" -eq 0 ]; then

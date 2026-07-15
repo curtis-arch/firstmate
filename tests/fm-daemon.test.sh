@@ -603,9 +603,23 @@ test_is_wake_reason_distinguishes_status_stdout() {
   is_wake_reason "stale: s:fm-x" || fail "stale: not recognized as wake"
   is_wake_reason "check: /s/c.sh: merged" || fail "check: not recognized as wake"
   is_wake_reason "heartbeat" || fail "heartbeat not recognized as wake"
+  is_wake_reason "possible-external-destruction: task=orca-x; recovery: inspect refs" \
+    || fail "possible-external-destruction: not recognized as wake"
   is_wake_reason "watcher: already running" && fail "singleton status line misclassified as wake"
   is_wake_reason "watcher: already running pid 123" && fail "singleton status (pid) misclassified as wake"
   pass "is_wake_reason distinguishes watcher wake reasons from singleton-status stdout"
+}
+
+test_possible_external_destruction_always_escalates() {
+  local dir state reason
+  dir=$(make_supercase destruction-escalates); state="$dir/state"
+  reason="possible-external-destruction: task=orca-x; recovery: inspect branch/ref and worktree; do not delete automatically"
+  FM_STATE_OVERRIDE="$state" handle_wake "$reason" "$state"
+  assert_grep "task=orca-x" "$state/.subsuper-escalations" \
+    "daemon should preserve the task identity in the external-destruction escalation"
+  assert_grep "inspect branch/ref and worktree" "$state/.subsuper-escalations" \
+    "daemon should preserve recovery guidance in the external-destruction escalation"
+  pass "daemon: possible external destruction is a recognized, explicit escalation"
 }
 
 test_terminal_stale_escalate_leaves_no_marker() {
@@ -1682,6 +1696,7 @@ test_heartbeat_scan_dedup
 test_handle_wake_routes_self_and_escalate
 test_inject_skip_forces_self
 test_is_wake_reason_distinguishes_status_stdout
+test_possible_external_destruction_always_escalates
 test_terminal_stale_escalate_leaves_no_marker
 test_signal_escalate_marks_seen_no_catchall_refire
 test_collapse_newlines_pure
