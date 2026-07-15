@@ -1731,7 +1731,7 @@ teardown_claim_blocks_task_mutations() {
   orca_recovery_meta "$state" claim term-old \
     11111111-1111-4111-8111-111111111111:22222222-2222-4222-8222-222222222222
   identity=$(FM_STATE_OVERRIDE="$state" bash -c '. "$0/bin/fm-meta-lib.sh"; fm_meta_identity "$1"' "$ROOT" "$meta")
-  owner=owner-one
+  owner='owner-one'
   claimed=$(FM_STATE_OVERRIDE="$state" bash -c '. "$0/bin/fm-meta-lib.sh"; fm_meta_claim_teardown "$1" "$2" "$3"' \
     "$ROOT" "$meta" "$identity" "$owner") || fail "teardown could not claim live metadata"
   assert_grep 'lifecycle=teardown:owner-one' "$meta" "teardown claim was not persisted"

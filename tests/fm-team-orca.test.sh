@@ -285,9 +285,9 @@ test_team_pane_state_working_and_done() {
   orca_case pane-state-done
   list_json term_mate_1 > "$RESP/1.out"
   show_json term_mate_1 "$MATE_PANE" true true > "$RESP/2.out"
-  ps_json "[$(agent_json "$COORD_PANE" working),$(agent_json "$MATE_PANE" done)]" > "$RESP/3.out"
+  ps_json "[$(agent_json "$COORD_PANE" working),$(agent_json "$MATE_PANE" 'done')]" > "$RESP/3.out"
   out=$(team_pane_state)
-  [ "$out" = done ] || fail "matched agent done should be done, got '$out'"
+  [ "$out" = 'done' ] || fail "matched agent done should be done, got '$out'"
   pass "fm_backend_orca_team_pane_state: exact pane-key joins map working/done"
 }
 
