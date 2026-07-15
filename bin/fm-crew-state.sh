@@ -15,7 +15,7 @@
 # fixed mapping logic, no heuristics and no LLM. Output is one stable, parseable,
 # token-tight line firstmate can read every heartbeat:
 #
-#   state: <working|parked|done|blocked|paused|failed|unknown> · source: <run-step|pane|status-log|none> · <detail>
+#   state: <working|parked|done|blocked|paused|failed|unknown> · source: <run-step|pane|backend-agent|status-log|none> · <detail>
 #
 # Logic, in order:
 #   1. Resolve worktree + backend target + kind from state/<id>.meta.
@@ -36,7 +36,10 @@
 #      recorded backend's pane busy state, then the status log's last line only
 #      when its verb maps to a recognized run-state. Decision-only events such as
 #      `resolved` never become current state or detail.
-#   5. Missing meta or torn-down worktree: report unknown · none. If no run is
+#   5. A recorded Orca worktree that is exactly absent while its runtime is
+#      reachable reports possible-external-destruction · backend. Missing meta,
+#      an unknown probe, or an ordinarily torn-down worktree reports unknown ·
+#      none. If no run is
 #      attributed to this crew, a dead endpoint also reports unknown · none rather
 #      than trusting a stale status log.
 #
@@ -90,6 +93,21 @@ meta_value() {  # <key>
 WT=$(meta_value worktree)
 KIND=$(meta_value kind)
 [ -n "$KIND" ] || KIND=ship
+TASK_BACKEND=$(fm_backend_of_meta "$META")
+BACKEND_TARGET=$(fm_backend_target_of_meta "$META")
+LIFECYCLE=$(meta_value lifecycle)
+
+[ -z "$LIFECYCLE" ] || emit unknown none "task lifecycle inactive: $LIFECYCLE"
+
+# Orca owns its task worktree, so its exact runtime absence signal precedes the
+# local-path and terminal checks. A missing PTY alone is deliberately ignored.
+if [ "$TASK_BACKEND" = orca ]; then
+  ORCA_WORKTREE_ID=$(fm_meta_get "$META" orca_worktree_id)
+  ORCA_WORKTREE_PRESENCE=$(fm_backend_worktree_presence orca "$ORCA_WORKTREE_ID" 2>/dev/null)
+  if [ "$ORCA_WORKTREE_PRESENCE" = possible-external-destruction ]; then
+    emit possible-external-destruction backend "task $ID: Orca runtime reachable but recorded worktree $ORCA_WORKTREE_ID is absent; inspect the task branch/ref and recorded path $WT before recovery or teardown; do not delete, recreate, reset, or discard automatically"
+  fi
+fi
 
 # A torn-down (or never-created) worktree has no current state to read.
 if [ -z "$WT" ] || [ ! -d "$WT" ]; then
@@ -132,8 +150,6 @@ LOG_VERB=$(status_line_verb "$LOG_LINE")
 # state (e.g. done) instead of being masked as unknown. Backend-aware
 # (fm_backend_of_meta defaults absent backend= to tmux, the P1 contract): a
 # herdr task is read through fm_backend_capture instead of a bare tmux probe.
-TASK_BACKEND=$(fm_backend_of_meta "$META")
-BACKEND_TARGET=$(fm_backend_target_of_meta "$META")
 EXPECTED_LABEL="fm-$ID"
 pane_readable() {  # <target>
   case "$TASK_BACKEND" in
@@ -169,8 +185,13 @@ crew_pane_is_busy() {  # <target>
   case "$TASK_BACKEND" in
     tmux) fm_pane_is_busy "$1" ;;
     *)
-      local bs tail40
-      bs=$(fm_backend_busy_state "$TASK_BACKEND" "$1" 2>/dev/null)
+      local bs tail40 worktree_id
+      if [ "$TASK_BACKEND" = orca ]; then
+        worktree_id=$(fm_meta_get "$META" orca_worktree_id)
+        bs=$(fm_backend_busy_state orca "$1" "$worktree_id" 2>/dev/null)
+      else
+        bs=$(fm_backend_busy_state "$TASK_BACKEND" "$1" 2>/dev/null)
+      fi
       case "$bs" in
         busy) return 0 ;;
         *)
@@ -549,6 +570,17 @@ fi
 # unknown rather than trusting a possibly-stale status log as the current state.
 [ -n "$BACKEND_TARGET" ] || emit unknown none "no backend target recorded"
 pane_readable "$BACKEND_TARGET" || emit unknown none "backend target gone: $BACKEND_TARGET"
+
+# A native attention state is stronger than idle-pane/status-log fallback but
+# does not override an authoritative run-step above. Preserve the backend's
+# waiting-vs-blocked detail while using the existing actionable blocked state.
+if [ "$TASK_BACKEND" = orca ]; then
+  worktree_id=$(fm_meta_get "$META" orca_worktree_id)
+  ATTENTION_STATE=$(fm_backend_attention_state orca "$BACKEND_TARGET" "$worktree_id" 2>/dev/null)
+  case "$ATTENTION_STATE" in
+    waiting|blocked) emit blocked backend-agent "Orca agent $ATTENTION_STATE" ;;
+  esac
+fi
 
 # Secondmates idle on their own watcher (idle pane = healthy), so the busy
 # signature is not meaningful for them; read their state from the status log only.

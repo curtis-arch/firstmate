@@ -122,7 +122,7 @@ test_scan_captain_relevant_statuses_classifier() {
 }
 
 test_classifier_primitives() {
-  local dir state open
+  local dir state open activity
   dir=$(make_case classify-primitives); state="$dir/state"
   printf 'working: a\n\ndone: b\n\n' > "$state/x.status"
   [ "$(last_status_line "$state/x.status")" = "done: b" ] || fail "last_status_line did not return the last non-blank line"
@@ -142,7 +142,29 @@ test_classifier_primitives() {
     && fail "a key token in note prose changed the decision key"
   printf '%s' "$open" | grep -F $'bad key\t' >/dev/null \
     && fail "an invalid key slug entered the open-decision set"
-  pass "classifier primitives: last line, captain-relevance, window->task, FM_CAPTAIN_RE override"
+  cat > "$state/activity.status" <<'EOF'
+working [key=phase7]: Phase 7 started
+working [key=phase6]: Phase 6 started
+working [key=legal]: reviewing legal dependency
+done [key=phase6]: Phase 6 completed
+resolved [key=phase7]: Phase 7 completed and moved to Done
+paused [key=legal]: awaiting external counsel
+resolved [key=legal]: legal item returned to the queue
+working [key=phase8]: Phase 8 started
+EOF
+  activity=$(status_open_activities "$state/activity.status")
+  printf '%s' "$activity" | grep -F $'phase8\tworking\tPhase 8 started' >/dev/null \
+    || fail "the current keyed working phase was not retained"
+  printf '%s' "$activity" | grep -F $'phase7\t' >/dev/null \
+    && fail "a keyed resolved event did not close the older working phase"
+  printf '%s' "$activity" | grep -F $'phase6\t' >/dev/null \
+    && fail "a same-key terminal event did not supersede the older working phase"
+  printf '%s' "$activity" | grep -F $'legal\t' >/dev/null \
+    && fail "a keyed resolved event did not close the declared pause"
+  printf 'working: legacy start\ndone: legacy completion\n' > "$state/legacy-activity.status"
+  [ -z "$(status_open_activities "$state/legacy-activity.status")" ] \
+    || fail "a legacy terminal event did not supersede the default working phase"
+  pass "classifier primitives: keyed decisions and activity phases, captain relevance, window-to-task, and overrides"
 }
 
 # crew_is_provably_working: the absorb-only-when-provably-working predicate. It is
@@ -346,6 +368,67 @@ test_actionable_signal_surfaced() {
   grep "$(printf '\tsignal\t')" "$drain_out" | grep -F "$status_file" >/dev/null || fail "actionable signal was not queued"
   [ -s "$state/.hb-surfaced-task" ] || fail "actionable signal did not record the surfaced marker"
   pass "captain-relevant signal is surfaced (queue + exit) and marked surfaced"
+}
+
+test_orca_worktree_destruction_surfaces_without_endpoint() {
+  local dir state fakebin out drain_out id pid
+  dir=$(make_case orca-worktree-destruction); state="$dir/state"; fakebin="$dir/fakebin"
+  out="$dir/watch.out"; drain_out="$dir/drain.out"; id="orca-destroyed-w1"
+  fm_write_meta "$state/$id.meta" \
+    "window=fm-$id" "terminal=term-vanished" "backend=orca" \
+    "orca_worktree_id=wt-vanished" "worktree=$dir/missing-wt" "project=$dir/project" "kind=ship"
+  cat > "$fakebin/orca" <<'SH'
+#!/usr/bin/env bash
+case "${1:-} ${2:-}" in
+  "status --json") printf '{"ok":true,"result":{"runtime":{"reachable":true,"state":"ready"}}}\n' ;;
+  "worktree show") printf '{"ok":false,"error":{"code":"worktree_not_found","message":"gone"}}\n' ;;
+  *) exit 1 ;;
+esac
+SH
+  chmod +x "$fakebin/orca"
+  watch_bg "$state" "$fakebin" "$out"
+  pid=$!
+  wait_for_exit "$pid" 40 || fail "watcher did not surface a confidently absent Orca worktree"
+  grep -F "possible-external-destruction: task=$id" "$out" >/dev/null \
+    || fail "watcher did not name the destroyed task: $(cat "$out")"
+  grep -F "do not delete, recreate, reset, or discard automatically" "$out" >/dev/null \
+    || fail "watcher wake omitted recovery safety guidance"
+  FM_STATE_OVERRIDE="$state" "$DRAIN" > "$drain_out" 2>/dev/null || fail "drain after Orca destruction wake failed"
+  grep "$(printf '\tpossible-external-destruction\t')" "$drain_out" | grep -F "$id" >/dev/null \
+    || fail "Orca destruction was not queued under its distinct wake kind"
+  [ "$(cat "$state/.possible-external-destruction-$id" 2>/dev/null)" = wt-vanished ] \
+    || fail "watcher did not record the destruction suppressor"
+  pass "watcher: missing Orca PTY is bypassed; exact worktree absence surfaces a distinct task wake"
+}
+
+test_orca_inactive_metadata_skips_destruction_wake() {
+  local dir state fakebin out id pid
+  dir=$(make_case orca-inactive-worktree); state="$dir/state"; fakebin="$dir/fakebin"
+  out="$dir/watch.out"; id="orca-inactive-w2"
+  fm_write_meta "$state/$id.meta" \
+    "window=fm-$id" "terminal=term-inactive" "backend=orca" \
+    "orca_worktree_id=wt-inactive" "worktree=$dir/missing-wt" "project=$dir/project" "kind=ship" \
+    "lifecycle=teardown:owner"
+  cat > "$fakebin/orca" <<'SH'
+#!/usr/bin/env bash
+case "${1:-} ${2:-}" in
+  "status --json") printf '{"ok":true,"result":{"runtime":{"reachable":true,"state":"ready"}}}\n' ;;
+  "worktree show") printf '{"ok":false,"error":{"code":"worktree_not_found","message":"gone"}}\n' ;;
+  *) exit 1 ;;
+esac
+SH
+  chmod +x "$fakebin/orca"
+  watch_bg "$state" "$fakebin" "$out"
+  pid=$!
+  if ! wait_live "$pid" 20; then
+    reap "$pid"; fail "watcher surfaced inactive teardown metadata as external destruction: $(cat "$out")"
+  fi
+  [ ! -s "$out" ] || fail "inactive Orca metadata printed a wake reason: $(cat "$out")"
+  [ ! -s "$state/.wake-queue" ] || fail "inactive Orca metadata queued a destruction wake"
+  assert_absent "$state/.possible-external-destruction-$id" \
+    "inactive Orca metadata recorded a destruction suppressor"
+  reap "$pid"
+  pass "watcher: inactive Orca metadata bypasses external-destruction probes"
 }
 
 test_terminal_stale_surfaced() {
@@ -1096,6 +1179,37 @@ test_afk_paused_changed_pane_hands_off_plain_stale() {
   pass "AFK changed paused panes hand off plain stale identities for daemon-owned pause triage"
 }
 
+test_orca_attention_wakes_immediately_with_distinguishable_reason() {
+  local dir state fakebin out drain_out pid
+  dir=$(make_case orca-attention); state="$dir/state"; fakebin="$dir/fakebin"
+  out="$dir/watch.out"; drain_out="$dir/drain.out"
+  fm_write_meta "$state/orca-attn.meta" "window=fm-orca-attn" "terminal=term-orca-attn" \
+    "backend=orca" "orca_worktree_id=repo::/scratch" "kind=ship"
+  cat > "$fakebin/orca" <<'SH'
+#!/usr/bin/env bash
+case "$1 $2" in
+  "terminal show")
+    printf '%s\n' '{"ok":true,"result":{"terminal":{"worktreeId":"repo::/scratch","tabId":"11111111-1111-4111-8111-111111111111","leafId":"22222222-2222-4222-8222-222222222222","connected":true,"writable":true}}}'
+    ;;
+  "worktree ps")
+    printf '%s\n' '{"ok":true,"result":{"worktrees":[{"worktreeId":"repo::/scratch","agents":[{"paneKey":"11111111-1111-4111-8111-111111111111:22222222-2222-4222-8222-222222222222","state":"waiting"}]}]}}'
+    ;;
+esac
+SH
+  chmod +x "$fakebin/orca"
+  watch_bg "$state" "$fakebin" "$out"
+  pid=$!
+  wait_for_exit "$pid" 40 || fail "Orca waiting state did not produce an immediate attention wake"
+  grep -Fx "attention: term-orca-attn (agent waiting)" "$out" >/dev/null \
+    || fail "Orca attention wake did not preserve waiting detail: $(cat "$out")"
+  [ "$(cat "$state/.attention-term-orca-attn" 2>/dev/null || true)" = waiting ] \
+    || fail "Orca attention state was not deduplicated"
+  FM_STATE_OVERRIDE="$state" "$DRAIN" > "$drain_out" 2>/dev/null || fail "attention wake drain failed"
+  grep "$(printf '\tattention\t')" "$drain_out" | grep -F "agent waiting" >/dev/null \
+    || fail "Orca attention wake was not queued distinctly"
+  pass "Orca attention states wake immediately with a distinct durable reason"
+}
+
 test_signal_reason_is_actionable_classifier
 test_stale_is_terminal_classifier
 test_scan_captain_relevant_statuses_classifier
@@ -1109,6 +1223,8 @@ test_turn_ended_provably_working_absorbed
 test_turn_ended_not_working_surfaced
 test_working_note_not_working_surfaced
 test_actionable_signal_surfaced
+test_orca_worktree_destruction_surfaces_without_endpoint
+test_orca_inactive_metadata_skips_destruction_wake
 test_terminal_stale_surfaced
 test_stale_terminal_status_overridden_by_active_run
 test_nonterminal_stale_provably_working_absorbed_then_escalated
@@ -1129,3 +1245,4 @@ test_heartbeat_backstop_surfaces_unsurfaced_status
 test_beacon_stays_fresh_while_absorbing
 test_afk_present_reverts_watcher_to_one_shot
 test_afk_paused_changed_pane_hands_off_plain_stale
+test_orca_attention_wakes_immediately_with_distinguishable_reason

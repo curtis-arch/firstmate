@@ -125,6 +125,20 @@ test_classify_check_and_unknown_escalate() {
   pass "check + unknown escalate; heartbeat self-handles"
 }
 
+test_attention_wake_escalates_distinctly() {
+  local dir state out reason
+  dir=$(make_supercase classify-attention)
+  state="$dir/state"
+  reason="attention: term-orca-attn (agent blocked)"
+  is_wake_reason "$reason" || fail "daemon did not recognize the attention wake vocabulary"
+  out=$(classify_attention "$reason")
+  case "$out" in escalate\|*"agent blocked"*) ;; *) fail "attention classifier did not preserve and escalate detail: $out" ;; esac
+  FM_STATE_OVERRIDE="$state" handle_wake "$reason" "$state"
+  assert_grep 'attention: term-orca-attn (agent blocked)' "$state/.subsuper-escalations" \
+    "daemon did not buffer the distinct attention reason"
+  pass "daemon recognizes and escalates a distinct attention wake"
+}
+
 test_stale_transient_self_records_marker() {
   local dir state out key
   dir=$(make_supercase stale-transient)
@@ -603,9 +617,23 @@ test_is_wake_reason_distinguishes_status_stdout() {
   is_wake_reason "stale: s:fm-x" || fail "stale: not recognized as wake"
   is_wake_reason "check: /s/c.sh: merged" || fail "check: not recognized as wake"
   is_wake_reason "heartbeat" || fail "heartbeat not recognized as wake"
+  is_wake_reason "possible-external-destruction: task=orca-x; recovery: inspect refs" \
+    || fail "possible-external-destruction: not recognized as wake"
   is_wake_reason "watcher: already running" && fail "singleton status line misclassified as wake"
   is_wake_reason "watcher: already running pid 123" && fail "singleton status (pid) misclassified as wake"
   pass "is_wake_reason distinguishes watcher wake reasons from singleton-status stdout"
+}
+
+test_possible_external_destruction_always_escalates() {
+  local dir state reason
+  dir=$(make_supercase destruction-escalates); state="$dir/state"
+  reason="possible-external-destruction: task=orca-x; recovery: inspect branch/ref and worktree; do not delete automatically"
+  FM_STATE_OVERRIDE="$state" handle_wake "$reason" "$state"
+  assert_grep "task=orca-x" "$state/.subsuper-escalations" \
+    "daemon should preserve the task identity in the external-destruction escalation"
+  assert_grep "inspect branch/ref and worktree" "$state/.subsuper-escalations" \
+    "daemon should preserve recovery guidance in the external-destruction escalation"
+  pass "daemon: possible external destruction is a recognized, explicit escalation"
 }
 
 test_terminal_stale_escalate_leaves_no_marker() {
@@ -693,6 +721,10 @@ test_busy_guard_defers_when_supervisor_busy() {
 }
 
 test_marker_detection() {
+  local marker_hex
+  marker_hex=$(printf '%s' "$FM_INJECT_MARK" | od -An -tx1 | tr -d ' \n')
+  [ "$marker_hex" = e281a3 ] \
+    || fail "FM_INJECT_MARK must use terminal-safe U+2063 bytes, got $marker_hex"
   # message_is_injection: marker present -> injection; absent -> real message
   message_is_injection "${FM_INJECT_MARK}Supervisor escalate: done" \
     || fail "marker-prefixed message not detected as injection"
@@ -1596,6 +1628,7 @@ test_inject_msg_herdr_pane_gone_defers() {
   afk_enter "$state"
   (
     fm_backend_target_exists() { return 1; }
+    # shellcheck disable=SC2329 # indirect guard: any call must fail this fixture
     fm_backend_busy_state() { fail "busy_state should not be consulted once the pane-exists check already failed"; }
     fm_backend_send_text_submit() { fail "send_text_submit should not run when the pane does not exist"; }
     if FM_SUPERVISOR_BACKEND=herdr FM_SUPERVISOR_TARGET="default:w1:gone" inject_msg "hello" "$state"; then
@@ -1656,6 +1689,7 @@ test_daemon_state_root_uses_fm_home
 test_classify_routine_signal_self
 test_classify_terminal_signal_escalates
 test_classify_check_and_unknown_escalate
+test_attention_wake_escalates_distinctly
 test_stale_transient_self_records_marker
 test_stale_terminal_escalates
 test_stale_paused_classifies_pause
@@ -1682,6 +1716,7 @@ test_heartbeat_scan_dedup
 test_handle_wake_routes_self_and_escalate
 test_inject_skip_forces_self
 test_is_wake_reason_distinguishes_status_stdout
+test_possible_external_destruction_always_escalates
 test_terminal_stale_escalate_leaves_no_marker
 test_signal_escalate_marks_seen_no_catchall_refire
 test_collapse_newlines_pure

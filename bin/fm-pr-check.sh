@@ -10,31 +10,59 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 FM_ROOT="${FM_ROOT_OVERRIDE:-$(cd "$SCRIPT_DIR/.." && pwd)}"
 FM_HOME="${FM_HOME:-${FM_ROOT_OVERRIDE:-$FM_ROOT}}"
 STATE="${FM_STATE_OVERRIDE:-$FM_HOME/state}"
+# shellcheck source=bin/fm-meta-lib.sh
+. "$FM_ROOT/bin/fm-meta-lib.sh"
 "$FM_ROOT/bin/fm-guard.sh" || true
 ID=$1
 URL=$2
 
 META="$STATE/$ID.meta"
-if [ -f "$META" ]; then
-  WT=$(grep '^worktree=' "$META" | tail -1 | cut -d= -f2- || true)
-  PR_HEAD=
-  if [ -n "$WT" ] && [ -d "$WT" ]; then
-    if command -v gh >/dev/null 2>&1; then
-      if REMOTE_HEAD=$(cd "$WT" && gh pr view "$URL" --json headRefOid -q .headRefOid 2>/dev/null); then
-        PR_HEAD=$REMOTE_HEAD
-      fi
+EXPECTED_IDENTITY=$(fm_meta_identity "$META") || {
+  echo "error: no live metadata for task $ID at $META" >&2
+  exit 1
+}
+EXPECTED_GENERATION=$(printf '%s\n' "$EXPECTED_IDENTITY" | sed -n 's/^generation=//p')
+WT=$(grep '^worktree=' "$META" | tail -1 | cut -d= -f2- || true)
+PR_HEAD=
+if [ -n "$WT" ] && [ -d "$WT" ]; then
+  if command -v gh >/dev/null 2>&1; then
+    if REMOTE_HEAD=$(cd "$WT" && gh pr view "$URL" --json headRefOid -q .headRefOid 2>/dev/null); then
+      PR_HEAD=$REMOTE_HEAD
     fi
   fi
+fi
+META_STATUS=0
+fm_meta_lock_acquire "$META" || exit 1
+CURRENT_IDENTITY=$(fm_meta_identity_unlocked "$META" 2>/dev/null || true)
+CURRENT_GENERATION=$(fm_meta_value_unlocked "$META" generation 2>/dev/null || true)
+if [ -z "$CURRENT_IDENTITY" ] || ! fm_meta_is_active_unlocked "$META" \
+  || { [ -n "$EXPECTED_GENERATION" ] && [ "$CURRENT_GENERATION" != "$EXPECTED_GENERATION" ]; } \
+  || { [ -z "$EXPECTED_GENERATION" ] && [ "$CURRENT_IDENTITY" != "$EXPECTED_IDENTITY" ]; }; then
+  META_STATUS=1
+else
   if ! grep -qxF "pr=$URL" "$META"; then
-    echo "pr=$URL" >> "$META"
+    if ! echo "pr=$URL" >> "$META"; then
+      META_STATUS=1
+    fi
   fi
-  if [ -n "$PR_HEAD" ] && ! grep -qxF "pr_head=$PR_HEAD" "$META"; then
-    echo "pr_head=$PR_HEAD" >> "$META"
+  if [ "$META_STATUS" -eq 0 ] && [ -n "$PR_HEAD" ] && ! grep -qxF "pr_head=$PR_HEAD" "$META"; then
+    if ! echo "pr_head=$PR_HEAD" >> "$META"; then
+      META_STATUS=1
+    fi
   fi
 fi
-
-cat > "$STATE/$ID.check.sh" <<EOF
+if [ "$META_STATUS" -eq 0 ]; then
+  if ! cat > "$STATE/$ID.check.sh" <<EOF
 state=\$(gh pr view "$URL" --json state -q .state 2>/dev/null)
 [ "\$state" = "MERGED" ] && echo "merged"
 EOF
+  then
+    META_STATUS=1
+  fi
+fi
+fm_meta_lock_release "$META"
+[ "$META_STATUS" -eq 0 ] || {
+  echo "error: task metadata changed or disappeared for $ID; PR state was not recorded" >&2
+  exit "$META_STATUS"
+}
 echo "armed: state/$ID.check.sh polls $URL"

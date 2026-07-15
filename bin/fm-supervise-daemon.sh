@@ -21,12 +21,13 @@
 # catch-up or when afk is re-entered.
 #
 # IN-BAND SENTINEL MARKER. Every daemon injection is prefixed with
-# FM_INJECT_MARK (ASCII unit separator, 0x1f) — a byte a human would never type
-# at the start of a message. Firstmate's contract: a message that starts with
-# the marker is an internal escalation (stay afk); a message without it means
-# the captain is back (exit afk, flush catch-up, resume per-wake responsiveness).
-# The marker and the busy-guard solve the same problem — the daemon and the
-# human share one input channel — so they live together under /afk.
+# FM_INJECT_MARK (U+2063 INVISIBLE SEPARATOR), a character a human cannot type
+# from a normal keyboard at the start of a message and Herdr transports as text.
+# Firstmate's contract: a message that starts with the marker is an internal
+# escalation (stay afk); a message without it means the captain is back (exit
+# afk, flush catch-up, resume per-wake responsiveness). The marker and the
+# busy-guard solve the same problem - the daemon and the human share one input
+# channel - so they live together under /afk.
 #
 # Reliability model (see the /afk skill):
 #   - Nothing is lost in away mode: while state/.afk exists, the watcher reverts
@@ -205,13 +206,15 @@ LOG_MAX_BYTES_DEFAULT=1048576
 LOG_KEEP_LINES_DEFAULT=2000
 
 # --- presence-gating + sentinel marker --------------------------------------
-# The in-band sentinel: ASCII unit separator (0x1f). Invisible and untypable on
-# a normal keyboard, so no real user message starts with it. Every daemon
-# injection is prefixed with this byte; firstmate treats a leading marker as an
-# internal escalation (stay afk) and its absence as "captain is back" (exit afk).
-# Portable across harnesses: it travels with the message text, independent of
-# any harness-level typed-vs-injected distinction.
-FM_INJECT_MARK=$'\x1f'
+# The in-band sentinel: U+2063 INVISIBLE SEPARATOR (UTF-8 e2 81 a3). It has no
+# normal keyboard keystroke, so no real user message starts with it. Unlike the
+# original ASCII unit separator, Herdr transports U+2063 through Pi's terminal
+# editor as text instead of consuming it as a control action. Every daemon
+# injection is prefixed with this character; firstmate treats a leading marker
+# as an internal escalation (stay afk) and its absence as "captain is back"
+# (exit afk). Portable across harnesses: it travels with the message text,
+# independent of any harness-level typed-vs-injected distinction.
+FM_INJECT_MARK=$'\xE2\x81\xA3'
 AFK_FLAG_NAME=".afk"
 
 # Resolve the effective state dir. FM_STATE_OVERRIDE wins (testing); otherwise
@@ -385,10 +388,18 @@ classify_check() {  # <full reason>  — check scripts print only when firstmate
   printf 'escalate|%s' "$1"
 }
 
+classify_attention() {  # <full reason>
+  printf 'escalate|%s' "$1"
+}
+
 classify_heartbeat() {
   # The wake itself is routine; the catch-all scan runs separately in
   # housekeeping on the HEARTBEAT_SCAN_SECS cadence.
   printf 'self|heartbeat (catch-all scan runs in housekeeping)'
+}
+
+classify_possible_external_destruction() {  # <full reason>
+  printf 'escalate|%s' "$1"
 }
 
 # Anything unrecognized is escalated (fail-safe).
@@ -577,11 +588,17 @@ task_window_backend() {  # <window> <state>
 }
 
 stale_window_is_busy() {  # <window> <state>
-  local win=$1 state=$2 backend label tail40 bs
+  local win=$1 state=$2 backend label tail40 bs meta worktree_id
   backend=$(task_window_backend "$win" "$state")
   label="fm-$(window_to_task "$win" "$state")"
   tail40=$(fm_backend_capture "$backend" "$win" 40 "$label" 2>/dev/null) || return 2
-  bs=$(fm_backend_busy_state "$backend" "$win" 2>/dev/null)
+  if [ "$backend" = orca ]; then
+    meta=$(fm_backend_meta_for_window "$win" "$state" 2>/dev/null || true)
+    worktree_id=$(fm_meta_get "$meta" orca_worktree_id)
+    bs=$(fm_backend_busy_state orca "$win" "$worktree_id" 2>/dev/null)
+  else
+    bs=$(fm_backend_busy_state "$backend" "$win" 2>/dev/null)
+  fi
   case "$bs" in
     busy) return 0 ;;
   esac
@@ -1151,7 +1168,7 @@ should_force_self() {  # <reason>
 is_wake_reason() {  # <reason>
   local reason=$1
   case "$reason" in
-    signal:*|stale:*|check:*|heartbeat|heartbeat:*) return 0 ;;
+    signal:*|stale:*|attention:*|check:*|heartbeat|heartbeat:*|possible-external-destruction:*) return 0 ;;
   esac
   return 1
 }
@@ -1170,8 +1187,11 @@ handle_wake() {  # <reason> <state>
               decision=$(classify_signal "$arg" "$state") ;;
     stale:*)  kind=stale; arg="${reason#stale: }"
               decision=$(classify_stale "$arg" "$state") ;;
+    attention:*) kind=attention; arg="${reason#attention: }"
+                 decision=$(classify_attention "$reason") ;;
     check:*)  decision=$(classify_check "$reason") ;;
     heartbeat|heartbeat:*) decision=$(classify_heartbeat) ;;
+    possible-external-destruction:*) decision=$(classify_possible_external_destruction "$reason") ;;
     *)        decision=$(classify_unknown "$reason") ;;
   esac
   action=${decision%%|*}

@@ -35,15 +35,17 @@ Any value other than `tmux`, `herdr`, `zellij`, `orca`, or `cmux` is rejected un
 `fm-spawn.sh` accepts `tmux`, `herdr`, `zellij`, `orca`, and `cmux` for ship and scout tasks; `backend=orca` and `backend=cmux` both still refuse `--secondmate` until secondmate launch semantics are designed for each.
 `codex-app` is not an accepted runtime backend yet; [`docs/codex-app-backend.md`](codex-app-backend.md) owns the Codex App boundary.
 The session-start secondmate liveness sweep uses a deeper `fm_backend_agent_alive` probe where verified.
-Today that probe can classify tmux and herdr secondmate endpoints as `alive`, `dead`, or `unknown`; zellij, Orca, and cmux report `unknown` until their own agent-process classifiers are verified.
+Today that probe can classify tmux, herdr, and Orca task endpoints as `alive`, `dead`, or `unknown`; zellij and cmux report `unknown` until their own agent-process classifiers are verified, while Orca remains excluded from secondmate spawning.
+Orca liveness joins the recorded worktree and terminal pane identity to exactly one native agent: observed `working` or `done` is `alive`, an empty exact-worktree agent inventory behind a connected writable terminal is `dead`, and every unreadable, disconnected, malformed, cross-worktree, duplicate, or otherwise ambiguous result is `unknown` and must fail closed.
 A herdr spawn additionally version-gates against the installed `herdr` binary's protocol and requires `jq`, refusing loudly on an incompatible or missing installation.
 A zellij spawn additionally version-gates against the installed `zellij` binary's version and requires `jq`, refusing loudly when either is missing or the version is older than 0.44.
 A cmux spawn additionally version-gates against the installed `cmux` binary's version, requires `jq`, and requires the control socket to be reachable and accessible (see [`docs/cmux-backend.md`](cmux-backend.md) "Setup" for the one-time socket-access configuration this needs; Automation mode is the recommended socket control mode, with Password mode supported via `config/cmux-socket-password`), refusing loudly and non-retryably on a `cmuxOnly`/unauthenticated socket.
 A backend spawn refusal from a missing dependency, version gate, or unauthenticated socket is terminal for that selected backend; firstmate surfaces it as a blocker instead of silently retrying another backend.
 Task meta records `backend=` only for a non-default backend; an absent `backend=` means `tmux`, preserving existing default-path meta files.
+A task meta records an immutable `generation=` across every backend, and an active task has no `lifecycle=` line. Teardown temporarily writes `lifecycle=teardown:<owner>` while it owns destructive cleanup; secondmate recovery writes `lifecycle=replacement:<generation>` after preflight and before retiring the old endpoint, then atomically replaces that reservation with the new endpoint metadata. Either reservation makes recovery and endpoint promotion fail closed against concurrent or stale task identities.
 A herdr task additionally records `herdr_session=`, `herdr_workspace_id=`, `herdr_tab_id=`, and `herdr_pane_id=`.
 A zellij task additionally records `zellij_session=`, `zellij_tab_id=`, and `zellij_pane_id=`.
-An Orca task additionally records `orca_worktree_id=` and `terminal=`, with `window=fm-<id>` kept as the shared firstmate alias.
+An Orca task additionally records `orca_worktree_id=`, `terminal=`, and `orca_pane_key=<tab UUID>:<leaf UUID>`, with `window=fm-<id>` kept as the shared firstmate alias; the pane key is the remint-stable identity used to recover a stale runtime-epoch terminal handle without guessing.
 A cmux task additionally records `cmux_workspace_id=` and `cmux_surface_id=`.
 Task selectors for `fm-peek.sh`, `fm-send.sh`, and `fm-crew-state.sh` resolve centrally through `fm_backend_resolve_selector`.
 A selector containing `:` is passed through as an explicit backend endpoint escape hatch.
@@ -326,6 +328,7 @@ HERDR_SESSION=default  # herdr-only: named session for normal backend ops; not e
 FM_BACKEND_HERDR_COMPOSER_LINES=20  # herdr-only: tail lines scanned by composer-state guard/fallback paths; idle-baseline submit confirmation uses agent-state
 FM_BACKEND_HERDR_IDLE_RE='^Type a message\.\.\.$'  # herdr-only: empty-composer placeholder regex after shared ghost extraction plus border and prompt stripping
 FM_BACKEND_HERDR_BARE_PROMPT_RE='^[❯›]'  # herdr-only: verified agent glyphs recognized as an UNBORDERED (bare) composer row, e.g. claude's ❯ or codex's ›; shell glyphs remain unknown rather than empty, and de-emphasised ghost/placeholder text (dim or dark-truecolor) after an agent prompt reads empty via the shared fm_composer_strip_ghost (docs/herdr-backend.md "Incident (2026-07-08)", "Incident (2026-07-10)")
+FM_BACKEND_HERDR_PI_COMPOSER_MAX_LINES=8  # herdr-only: maximum rows admitted between Pi's native-identity-corroborated separator pair; taller or ambiguous candidates stay unknown (docs/herdr-backend.md "Incident (2026-07-14)")
 FM_BACKEND_HERDR_SUBMIT_POLLS=6  # herdr-only: agent-state samples spread across each Enter attempt's budget when confirming a submit (docs/herdr-backend.md "Native agent-state submit confirmation")
 FM_BACKEND_HERDR_SUBMIT_MIN_SLEEP=0.6  # herdr-only: minimum per-Enter confirmation budget before polling agent-state after an idle baseline
 FM_BACKEND_ORCA_COMPOSER_LINES=200  # orca-only: terminal-read lines scanned to locate the composer row for submit verification

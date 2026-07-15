@@ -65,11 +65,27 @@ add_tmux_fake() {
 #!/usr/bin/env bash
 set -u
 LOG="${FM_ORCA_LOG:?}"
+KILLED="$LOG.tmux-killed"
 {
   printf 'tmux'
   for a in "$@"; do printf '\x1f%s' "$a"; done
   printf '\n'
 } >> "$LOG"
+if [ "${1:-}" = kill-window ]; then
+  target=
+  while [ "$#" -gt 0 ]; do
+    if [ "$1" = -t ]; then shift; target=${1:-}; break; fi
+    shift
+  done
+  [ -z "$target" ] || printf '%s\n' "$target" >> "$KILLED"
+elif [ "${1:-}" = display-message ]; then
+  target=
+  while [ "$#" -gt 0 ]; do
+    if [ "$1" = -t ]; then shift; target=${1:-}; break; fi
+    shift
+  done
+  if [ -n "$target" ] && grep -qxF "$target" "$KILLED" 2>/dev/null; then exit 1; fi
+fi
 exit 0
 SH
   chmod +x "$fb/tmux"
@@ -131,6 +147,50 @@ test_runtime_check_refuses_unready_orca_status() {
   [ "$status" -ne 0 ] || fail "runtime_check should fail when Orca runtime is not ready"
   assert_contains "$out" "requires a ready Orca runtime" "runtime_check should explain the readiness requirement"
   pass "fm_backend_orca_runtime_check: fails closed when runtime is not ready"
+}
+
+test_worktree_presence_taxonomy_is_strict_and_endpoint_independent() {
+  local out
+  orca_case presence-absent
+  printf '{"ok":false,"error":{"code":"worktree_not_found","message":"gone"}}\n' > "$RESP/1.out"
+  out=$( PATH="$FB:$PATH" FM_ORCA_LOG="$LOG" FM_ORCA_RESPONSES="$RESP" \
+    bash -c '. "$0/bin/backends/orca.sh"; fm_backend_orca_worktree_presence wt-gone' "$ROOT" )
+  [ "$out" = possible-external-destruction ] || fail "exact worktree_not_found under a ready runtime should be possible-external-destruction, got '$out'"
+
+  orca_case presence-live-no-endpoint
+  printf '{"ok":true,"result":{"worktree":{"id":"wt-live","path":"/tmp/wt-live"}}}\n' > "$RESP/1.out"
+  out=$( PATH="$FB:$PATH" FM_ORCA_LOG="$LOG" FM_ORCA_RESPONSES="$RESP" \
+    bash -c '. "$0/bin/backends/orca.sh"; fm_backend_orca_worktree_presence wt-live' "$ROOT" )
+  [ "$out" = present ] || fail "a matching worktree should be present even with no terminal endpoint, got '$out'"
+  assert_not_contains "$(cat "$LOG")" $'orca\x1f''terminal' \
+    "worktree presence must not use endpoint existence as destruction evidence"
+
+  orca_case presence-runtime-down
+  printf '{"ok":true,"result":{"runtime":{"reachable":false,"state":"unavailable"}}}\n' > "$RESP/1.out"
+  out=$( PATH="$FB:$PATH" FM_ORCA_LOG="$LOG" FM_ORCA_RESPONSES="$RESP" FM_ORCA_STATUS_RESPONSE=sequence \
+    bash -c '. "$0/bin/backends/orca.sh"; fm_backend_orca_worktree_presence wt-gone' "$ROOT" )
+  [ "$out" = unknown ] || fail "runtime unavailability must remain unknown, got '$out'"
+  assert_not_contains "$(cat "$LOG")" $'orca\x1f''worktree' \
+    "an unavailable runtime should not license a worktree absence query"
+
+  orca_case presence-malformed-runtime
+  printf 'not-json\n' > "$RESP/1.out"
+  out=$( PATH="$FB:$PATH" FM_ORCA_LOG="$LOG" FM_ORCA_RESPONSES="$RESP" FM_ORCA_STATUS_RESPONSE=sequence \
+    bash -c '. "$0/bin/backends/orca.sh"; fm_backend_orca_worktree_presence wt-gone' "$ROOT" )
+  [ "$out" = unknown ] || fail "malformed runtime JSON must remain unknown, got '$out'"
+
+  orca_case presence-other-errors
+  printf '{"ok":false,"error":{"code":"terminal_handle_stale","message":"stale terminal"}}\n' > "$RESP/1.out"
+  out=$( PATH="$FB:$PATH" FM_ORCA_LOG="$LOG" FM_ORCA_RESPONSES="$RESP" \
+    bash -c '. "$0/bin/backends/orca.sh"; fm_backend_orca_worktree_presence wt-maybe' "$ROOT" )
+  [ "$out" = unknown ] || fail "a stale-terminal error must remain unknown, got '$out'"
+
+  orca_case presence-malformed-show
+  printf 'not-json\n' > "$RESP/1.out"
+  out=$( PATH="$FB:$PATH" FM_ORCA_LOG="$LOG" FM_ORCA_RESPONSES="$RESP" \
+    bash -c '. "$0/bin/backends/orca.sh"; fm_backend_orca_worktree_presence wt-maybe' "$ROOT" )
+  [ "$out" = unknown ] || fail "malformed worktree JSON must remain unknown, got '$out'"
+  pass "Orca worktree presence: exact three-way taxonomy, runtime-gated and endpoint-independent"
 }
 
 test_send_text_submit_verifies_empty_composer_after_enter() {
@@ -451,11 +511,10 @@ test_spawn_preserves_orca_metadata_when_pathless_worktree_cleanup_fails() {
   printf '{"ok":true,"result":{"worktree":{"id":"wt-pathless-cleanup"}}}\n' > "$RESP/3.out"
   printf '{"ok":false,"error":{"code":"worktree_not_removed","message":"worktree not removed"}}\n' > "$RESP/4.out"
   printf '{"ok":false,"error":{"code":"worktree_not_removed","message":"worktree not removed"}}\n' > "$RESP/5.out"
-  out=$( PATH="$FB:$PATH" FM_ORCA_LOG="$LOG" FM_ORCA_RESPONSES="$RESP" \
+  if out=$( PATH="$FB:$PATH" FM_ORCA_LOG="$LOG" FM_ORCA_RESPONSES="$RESP" \
     FM_ROOT_OVERRIDE="$ROOT" FM_STATE_OVERRIDE="$state" FM_DATA_OVERRIDE="$data" FM_CONFIG_OVERRIDE="$config" \
     FM_PROJECTS_OVERRIDE="$TMP_ROOT/unused-projects" FM_SPAWN_NO_GUARD=1 \
-    "$ROOT/bin/fm-spawn.sh" "$id" "$proj" claude --backend orca 2>&1 )
-  status=$?
+    "$ROOT/bin/fm-spawn.sh" "$id" "$proj" claude --backend orca 2>&1 ); then status=0; else status=$?; fi
   [ "$status" -ne 0 ] || fail "Orca spawn should fail when path parsing and cleanup fail"
   assert_contains "$out" "orca worktree create did not return a path" \
     "pathless worktree failure should explain the missing path"
@@ -485,7 +544,7 @@ test_spawn_writes_orca_metadata_and_launches_harness() {
   log="$LOG"
   printf '1\n' > "$RESP/1.exit"
   printf '{"ok":true,"result":{"repo":{"id":"repo-spawn"}}}\n' > "$RESP/2.out"
-  printf '{"ok":true,"result":{"worktree":{"id":"wt-spawn","path":"%s"},"terminal":{"handle":"term-spawn"}}}\n' "$wt" > "$RESP/3.out"
+  printf '{"ok":true,"result":{"worktree":{"id":"wt-spawn","path":"%s"},"terminal":{"handle":"term-spawn","paneKey":"11111111-1111-4111-8111-111111111111:22222222-2222-4222-8222-222222222222"}}}\n' "$wt" > "$RESP/3.out"
   out=$( PATH="$FB:$PATH" FM_ORCA_LOG="$LOG" FM_ORCA_RESPONSES="$RESP" \
     FM_ROOT_OVERRIDE="$ROOT" FM_STATE_OVERRIDE="$state" FM_DATA_OVERRIDE="$data" FM_CONFIG_OVERRIDE="$config" \
     FM_PROJECTS_OVERRIDE="$TMP_ROOT/unused-projects" FM_SPAWN_NO_GUARD=1 \
@@ -496,6 +555,8 @@ test_spawn_writes_orca_metadata_and_launches_harness() {
   assert_grep "backend=orca" "$state/$id.meta" "meta missing backend=orca"
   assert_grep "window=fm-$id" "$state/$id.meta" "meta missing stable Orca window alias"
   assert_grep "terminal=term-spawn" "$state/$id.meta" "meta missing terminal handle"
+  assert_grep "orca_pane_key=11111111-1111-4111-8111-111111111111:22222222-2222-4222-8222-222222222222" "$state/$id.meta" \
+    "meta missing the creation JSON pane key"
   assert_grep "orca_worktree_id=wt-spawn" "$state/$id.meta" "meta missing Orca worktree id"
   assert_grep "worktree=$wt" "$state/$id.meta" "meta missing Orca worktree path"
   assert_not_contains "$(cat "$log")" $'orca\x1f''terminal'$'\x1f''create' \
@@ -506,6 +567,35 @@ test_spawn_writes_orca_metadata_and_launches_harness() {
     "spawn did not send the selected harness launch command through Orca"
   rm -rf "/tmp/fm-$id"
   pass "fm-spawn.sh --backend orca: reuses implicit terminal, records metadata, launches harness"
+}
+
+test_spawn_refuses_existing_metadata_without_overwrite() {
+  local proj wt data state config id out status
+  id="orcareusez2"
+  proj="$TMP_ROOT/reuse-project"
+  wt="$TMP_ROOT/reuse-wt"
+  data="$TMP_ROOT/reuse-data"
+  state="$TMP_ROOT/reuse-state"
+  config="$TMP_ROOT/reuse-config"
+  fm_git_worktree "$proj" "$wt" "fm/$id"
+  mkdir -p "$data/$id" "$state" "$config"
+  printf 'brief\n' > "$data/$id/brief.md"
+  printf 'window=fm-replacement\nworktree=/replacement\nproject=/replacement\nterminal=term-replacement\n' > "$state/$id.meta"
+  touch "$state/.last-watcher-beat"
+  orca_case spawn-reuse
+  printf '1\n' > "$RESP/1.exit"
+  printf '{"ok":true,"result":{"repo":{"id":"repo-reuse"}}}\n' > "$RESP/2.out"
+  printf '{"ok":true,"result":{"worktree":{"id":"wt-reuse","path":"%s"},"terminal":{"handle":"term-reuse","paneKey":"11111111-1111-4111-8111-111111111111:22222222-2222-4222-8222-222222222222"}}}\n' "$wt" > "$RESP/3.out"
+  if out=$( PATH="$FB:$PATH" FM_ORCA_LOG="$LOG" FM_ORCA_RESPONSES="$RESP" \
+    FM_ROOT_OVERRIDE="$ROOT" FM_STATE_OVERRIDE="$state" FM_DATA_OVERRIDE="$data" FM_CONFIG_OVERRIDE="$config" \
+    FM_PROJECTS_OVERRIDE="$TMP_ROOT/unused-projects" FM_SPAWN_NO_GUARD=1 \
+    "$ROOT/bin/fm-spawn.sh" "$id" "$proj" claude --backend orca 2>&1 ); then status=0; else status=$?; fi
+  [ "$status" -ne 0 ] || fail "same-ID Orca spawn should refuse existing metadata"
+  assert_contains "$out" "task metadata already exists" "same-ID spawn did not explain the metadata refusal"
+  assert_grep 'terminal=term-replacement' "$state/$id.meta" "same-ID spawn overwrote replacement metadata"
+  assert_no_grep 'orca_worktree_id=wt-reuse' "$state/$id.meta" "same-ID spawn installed its new lifecycle identity"
+  rm -rf "/tmp/fm-$id"
+  pass "fm-spawn.sh --backend orca: refuses same-ID metadata replacement"
 }
 
 test_spawn_refuses_orca_secondmate_before_home_mutation() {
@@ -528,8 +618,8 @@ test_spawn_refuses_orca_secondmate_before_home_mutation() {
   status=$?
   set +e
   [ "$status" -ne 0 ] || fail "backend=orca --secondmate should be refused"
-  assert_contains "$out" "backend=orca does not support --secondmate spawns yet" \
-    "orca secondmate refusal should happen at backend selection"
+  assert_contains "$out" "backend=orca does not support --secondmate spawns: Orca has no adopt-existing-directory worktree primitive" \
+    "orca secondmate refusal should name the exact missing Orca primitive"
   assert_absent "$subhome/config/crew-harness" \
     "orca secondmate refusal should not propagate inheritable config into the secondmate home"
   pass "fm-spawn.sh --backend orca --secondmate: refuses before secondmate-home mutation"
@@ -664,7 +754,7 @@ test_spawn_preserves_orca_metadata_when_abort_cleanup_fails() {
   pass "fm-spawn.sh --backend orca: preserves metadata when abort cleanup fails"
 }
 
-test_spawn_releases_orca_resources_when_metadata_write_fails() {
+test_spawn_refuses_unwritable_metadata_before_orca_mutation() {
   local proj wt data state_file config id out status
   id="orcametafailz9"
   proj="$TMP_ROOT/meta-fail-project"
@@ -688,12 +778,12 @@ test_spawn_releases_orca_resources_when_metadata_write_fails() {
   status=$?
   [ "$status" -ne 0 ] || fail "Orca spawn should fail when metadata cannot be written"
   assert_contains "$out" "File exists" "spawn should fail at the state directory creation point"
-  assert_contains "$(cat "$LOG")" $'orca\x1f''terminal'$'\x1f''close'$'\x1f''--terminal'$'\x1f''term-meta-fail'$'\x1f''--json' \
-    "Orca spawn should close the recorded terminal when a later abort occurs"
-  assert_contains "$(cat "$LOG")" $'orca\x1f''worktree'$'\x1f''rm'$'\x1f''--worktree'$'\x1f''id:wt-meta-fail'$'\x1f''--force'$'\x1f''--json' \
-    "Orca spawn should remove the recorded worktree when a later abort occurs"
-  assert_absent "$state_file/$id.meta" "metadata-write abort should not leave metadata after successful cleanup"
-  pass "fm-spawn.sh --backend orca: releases terminal and worktree on later aborts"
+  assert_not_contains "$(cat "$LOG")" $'orca\x1f''worktree'$'\x1f''create' \
+    "Orca spawn should reserve writable metadata before creating a worktree"
+  assert_not_contains "$(cat "$LOG")" $'orca\x1f''terminal'$'\x1f''create' \
+    "Orca spawn should reserve writable metadata before creating a terminal"
+  assert_absent "$state_file/$id.meta" "preflight metadata refusal should not leave metadata"
+  pass "fm-spawn.sh --backend orca: refuses unwritable metadata before mutation"
 }
 
 test_peek_send_and_crew_state_route_through_orca_meta() {
@@ -760,16 +850,61 @@ test_peek_and_crew_state_fail_closed_on_orca_error_json() {
   pass "fm-peek/fm-crew-state: Orca read error JSON fails closed"
 }
 
+test_crew_state_surfaces_possible_external_destruction() {
+  local state id out
+  id="orcadestroyedz8"
+  state="$TMP_ROOT/destroyed-state"; mkdir -p "$state"
+  fm_write_meta "$state/$id.meta" \
+    "window=fm-$id" "terminal=term-gone" "worktree=$TMP_ROOT/absent-worktree" \
+    "project=$TMP_ROOT/project" "harness=claude" "kind=ship" "backend=orca" \
+    "orca_worktree_id=wt-destroyed"
+  orca_case crew-state-destroyed
+  printf '{"ok":false,"error":{"code":"worktree_not_found","message":"gone"}}\n' > "$RESP/1.out"
+  out=$( PATH="$FB:$PATH" FM_ORCA_LOG="$LOG" FM_ORCA_RESPONSES="$RESP" \
+    FM_ROOT_OVERRIDE="$ROOT" FM_STATE_OVERRIDE="$state" "$ROOT/bin/fm-crew-state.sh" "$id" )
+  assert_contains "$out" "state: possible-external-destruction" \
+    "crew-state should expose the distinct external-destruction state"
+  assert_contains "$out" "task $id" "crew-state destruction guidance should name the Firstmate task"
+  assert_contains "$out" "do not delete, recreate, reset, or discard automatically" \
+    "crew-state should carry fail-safe recovery guidance"
+  assert_not_contains "$(cat "$LOG")" $'orca\x1f''terminal' \
+    "crew-state should not require an endpoint-gone result to prove worktree absence"
+  pass "fm-crew-state: confidently absent Orca worktree is a distinct recoverable state"
+}
+
+test_crew_state_skips_inactive_orca_metadata() {
+  local state id out
+  id="orcainactivez4"
+  state="$TMP_ROOT/inactive-state"; mkdir -p "$state"
+  fm_write_meta "$state/$id.meta" \
+    "window=fm-$id" "terminal=term-inactive" "worktree=$TMP_ROOT/absent-inactive-worktree" \
+    "project=$TMP_ROOT/project" "harness=claude" "kind=ship" "backend=orca" \
+    "orca_worktree_id=wt-inactive" "lifecycle=teardown:owner"
+  orca_case crew-state-inactive
+  out=$( PATH="$FB:$PATH" FM_ORCA_LOG="$LOG" FM_ORCA_RESPONSES="$RESP" \
+    FM_ROOT_OVERRIDE="$ROOT" FM_STATE_OVERRIDE="$state" "$ROOT/bin/fm-crew-state.sh" "$id" )
+  assert_contains "$out" "state: unknown" "inactive crew-state should not remain routable"
+  assert_contains "$out" "task lifecycle inactive" "inactive crew-state should explain its lifecycle"
+  [ ! -s "$LOG" ] || fail "inactive crew-state probed Orca and could misclassify teardown as external destruction"
+  pass "fm-crew-state: inactive Orca metadata bypasses external-destruction probes"
+}
+
 test_target_exists_rejects_orca_error_json() {
-  local status
+  local status state meta
   orca_case target-exists-error-json
+  state="$CASE_DIR/state"
+  mkdir -p "$state"
+  meta="$state/task.meta"
+  printf 'window=fm-task\nbackend=orca\nterminal=term-stale\norca_worktree_id=repo::/scratch\norca_pane_key=11111111-1111-4111-8111-111111111111:22222222-2222-4222-8222-222222222222\n' > "$meta"
   printf '{"ok":false,"error":{"code":"terminal_handle_stale","message":"terminal handle stale"}}\n' > "$RESP/1.out"
   set +e
-  PATH="$FB:$PATH" FM_ORCA_LOG="$LOG" FM_ORCA_RESPONSES="$RESP" \
+  PATH="$FB:$PATH" FM_ORCA_LOG="$LOG" FM_ORCA_RESPONSES="$RESP" FM_STATE_OVERRIDE="$state" \
     bash -c '. "$0/bin/fm-backend.sh"; fm_backend_target_exists orca term-stale fm-task' "$ROOT"
   status=$?
   set -e
   [ "$status" -ne 0 ] || fail "fm_backend_target_exists should reject Orca ok:false read JSON"
+  assert_not_contains "$(cat "$LOG")" $'orca\x1f''terminal'$'\x1f''list' "fm_backend_target_exists must not recover a stale handle"
+  assert_grep 'terminal=term-stale' "$meta" "fm_backend_target_exists changed terminal metadata"
   pass "fm_backend_target_exists: Orca ok:false read JSON is not live"
 }
 
@@ -904,6 +1039,8 @@ test_teardown_preserves_metadata_when_orca_remove_error_json() {
   [ "$rc" -ne 0 ] || fail "Orca teardown should fail when worktree removal returns ok:false JSON"
   assert_contains "$out" "worktree not removed" "teardown should surface the Orca removal error"
   assert_present "$state/$id.meta" "failed Orca removal should preserve task metadata"
+  assert_grep 'lifecycle=teardown:' "$state/$id.meta" \
+    "failed Orca removal released teardown ownership after destructive work began"
   pass "fm-teardown.sh backend=orca: preserves metadata on remove ok:false JSON"
 }
 
@@ -933,7 +1070,49 @@ test_scout_teardown_refuses_orca_missing_report_when_path_missing() {
   assert_contains "$out" "has no report" "Orca scout teardown should explain the missing report"
   [ ! -s "$LOG" ] || fail "refused Orca scout teardown should not close terminals or remove worktrees"
   assert_present "$state/$id.meta" "refused Orca scout teardown should preserve metadata"
+  assert_no_grep 'lifecycle=' "$state/$id.meta" \
+    "pre-mutation teardown refusal should release teardown ownership"
   pass "fm-teardown.sh backend=orca: scout report gate precedes pathless helper cleanup"
+}
+
+test_secondmate_failed_child_cleanup_preserves_claims() {
+  local home subhome child_id neutral out rc parent_meta child_meta
+  home="$TMP_ROOT/orca-child-failure-parent"
+  subhome="$TMP_ROOT/orca-child-failure-secondmate"
+  child_id="orcachildfailz7"
+  parent_meta="$home/state/domain.meta"
+  child_meta="$subhome/state/$child_id.meta"
+  mkdir -p "$home/state" "$home/data" "$subhome/state" "$subhome/projects" "$subhome/bin" "$subhome/data" "$subhome/config"
+  printf 'domain\n' > "$subhome/.fm-secondmate-home"
+  printf '# Firstmate\n' > "$subhome/AGENTS.md"
+  fm_write_meta "$parent_meta" \
+    "window=firstmate:fm-domain" "worktree=$subhome" "project=$subhome" \
+    "harness=echo" "kind=secondmate" "mode=secondmate" "yolo=off" \
+    "home=$subhome" "projects=alpha"
+  printf '%s\n' "- domain - Orca child cleanup failure (home: $subhome; scope: orca cleanup; projects: alpha; added 2026-07-15)" \
+    > "$home/data/secondmates.md"
+  fm_write_meta "$child_meta" \
+    "window=fm-$child_id" "terminal=term-child-failure" "project=$subhome/projects/alpha" \
+    "harness=claude" "kind=ship" "mode=no-mistakes" "yolo=off" \
+    "backend=orca" "orca_worktree_id=wt-child-failure"
+  orca_case secondmate-child-cleanup-failure
+  printf '{"ok":false,"error":{"code":"worktree_not_removed","message":"child worktree not removed"}}\n' > "$RESP/2.out"
+  add_tmux_fake "$FB"
+  neutral=$(neutral_fm_root "$CASE_DIR/neutral")
+
+  set +e
+  out=$( PATH="$FB:$PATH" FM_ORCA_LOG="$LOG" FM_ORCA_RESPONSES="$RESP" \
+    FM_ROOT_OVERRIDE="$neutral" FM_HOME="$home" "$ROOT/bin/fm-teardown.sh" domain --force 2>&1 )
+  rc=$?
+  set -e
+
+  [ "$rc" -ne 0 ] || fail "forced secondmate teardown should fail when child worktree removal fails"
+  assert_contains "$out" "child worktree not removed" "child cleanup failure was not surfaced"
+  assert_grep 'lifecycle=teardown:' "$parent_meta" \
+    "failed child cleanup released parent teardown ownership"
+  assert_grep 'lifecycle=teardown:' "$child_meta" \
+    "failed child cleanup released the mutated child's teardown ownership"
+  pass "fm-teardown.sh --force: failed child cleanup preserves parent and child claims"
 }
 
 test_ship_teardown_refuses_orca_missing_worktree_path() {
@@ -1272,11 +1451,690 @@ test_dispatcher_sources_orca_and_routes_primitives() {
   pass "fm-backend dispatcher: accepts orca and routes capture through bin/backends/orca.sh"
 }
 
+test_spawn_falls_back_to_terminal_show_for_pane_key() {
+  local proj wt data state config id out
+  id="orcapanez1"
+  proj="$TMP_ROOT/pane-fallback-project"
+  wt="$TMP_ROOT/pane-fallback-wt"
+  data="$TMP_ROOT/pane-fallback-data"
+  state="$TMP_ROOT/pane-fallback-state"
+  config="$TMP_ROOT/pane-fallback-config"
+  fm_git_worktree "$proj" "$wt" "fm/$id"
+  mkdir -p "$data/$id" "$state" "$config"
+  printf 'brief\n' > "$data/$id/brief.md"
+  touch "$state/.last-watcher-beat"
+  orca_case pane-fallback
+  printf '1\n' > "$RESP/1.exit"
+  printf '{"ok":true,"result":{"repo":{"id":"repo-pane"}}}\n' > "$RESP/2.out"
+  printf '{"ok":true,"result":{"worktree":{"id":"wt-pane","path":"%s"},"terminal":{"handle":"term-pane"}}}\n' "$wt" > "$RESP/3.out"
+  printf '{"ok":true,"result":{"terminal":{"worktreeId":"wt-pane","tabId":"11111111-1111-4111-8111-111111111111","leafId":"22222222-2222-4222-8222-222222222222","connected":true,"writable":true}}}\n' > "$RESP/4.out"
+  out=$( PATH="$FB:$PATH" FM_ORCA_LOG="$LOG" FM_ORCA_RESPONSES="$RESP" \
+    FM_ROOT_OVERRIDE="$ROOT" FM_STATE_OVERRIDE="$state" FM_DATA_OVERRIDE="$data" FM_CONFIG_OVERRIDE="$config" \
+    FM_PROJECTS_OVERRIDE="$TMP_ROOT/unused-projects" FM_SPAWN_NO_GUARD=1 \
+    "$ROOT/bin/fm-spawn.sh" "$id" "$proj" claude --backend orca 2>&1 )
+  expect_code 0 $? "Orca spawn should succeed with show-based pane capture"$'\n'"$out"
+  assert_grep "orca_pane_key=11111111-1111-4111-8111-111111111111:22222222-2222-4222-8222-222222222222" "$state/$id.meta" \
+    "show-based pane capture was not recorded"
+  assert_contains "$(cat "$LOG")" $'orca\x1f''terminal'$'\x1f''show'$'\x1f''--terminal'$'\x1f''term-pane'$'\x1f''--json' \
+    "spawn did not fall back to terminal show when creation omitted paneKey"
+  rm -rf "/tmp/fm-$id"
+  pass "fm-spawn.sh --backend orca: falls back to terminal show for orca_pane_key"
+}
+
+test_spawn_rejects_placeholder_pane_key_without_failing() {
+  local proj wt data state config id out
+  id="orcapaneptyz2"
+  proj="$TMP_ROOT/pane-placeholder-project"
+  wt="$TMP_ROOT/pane-placeholder-wt"
+  data="$TMP_ROOT/pane-placeholder-data"
+  state="$TMP_ROOT/pane-placeholder-state"
+  config="$TMP_ROOT/pane-placeholder-config"
+  fm_git_worktree "$proj" "$wt" "fm/$id"
+  mkdir -p "$data/$id" "$state" "$config"
+  printf 'brief\n' > "$data/$id/brief.md"
+  touch "$state/.last-watcher-beat"
+  orca_case pane-placeholder
+  printf '1\n' > "$RESP/1.exit"
+  printf '{"ok":true,"result":{"repo":{"id":"repo-pane-pty"}}}\n' > "$RESP/2.out"
+  printf '{"ok":true,"result":{"worktree":{"id":"wt-pane-pty","path":"%s"},"terminal":{"handle":"term-pane-pty"}}}\n' "$wt" > "$RESP/3.out"
+  printf '{"ok":true,"result":{"terminal":{"worktreeId":"wt-pane-pty","tabId":"pty:opaque","leafId":"pty:opaque","connected":true,"writable":true}}}\n' > "$RESP/4.out"
+  out=$( PATH="$FB:$PATH" FM_ORCA_LOG="$LOG" FM_ORCA_RESPONSES="$RESP" \
+    FM_ROOT_OVERRIDE="$ROOT" FM_STATE_OVERRIDE="$state" FM_DATA_OVERRIDE="$data" FM_CONFIG_OVERRIDE="$config" \
+    FM_PROJECTS_OVERRIDE="$TMP_ROOT/unused-projects" FM_SPAWN_NO_GUARD=1 \
+    "$ROOT/bin/fm-spawn.sh" "$id" "$proj" claude --backend orca 2>&1 )
+  expect_code 0 $? "Orca spawn should remain compatible when pane identity is invalid"$'\n'"$out"
+  assert_no_grep 'orca_pane_key=' "$state/$id.meta" "placeholder pane ids must never be persisted"
+  assert_contains "$out" "stale terminal handles will remain unrecoverable" \
+    "spawn should warn once when no valid pane key can be captured"
+  rm -rf "/tmp/fm-$id"
+  pass "fm-spawn.sh --backend orca: rejects pty placeholders without blocking spawn"
+}
+
+orca_recovery_meta() {  # <state> <id> <terminal> <pane-key>
+  mkdir -p "$1"
+  cat > "$1/$2.meta" <<EOF
+generation=fixture-$2
+window=fm-$2
+backend=orca
+orca_worktree_id=repo::/scratch
+orca_pane_key=$4
+terminal=$3
+harness=claude
+kind=scout
+EOF
+}
+
+orca_stale_handle_recovery_adopts_one_connected_match() {
+  local state meta out log_text
+  orca_case recovery-success
+  state="$CASE_DIR/state"
+  meta="$state/recoverz1.meta"
+  orca_recovery_meta "$state" recoverz1 term-old \
+    11111111-1111-4111-8111-111111111111:22222222-2222-4222-8222-222222222222
+  printf '{"ok":false,"error":{"code":"terminal_handle_stale","message":"stale"}}\n' > "$RESP/1.out"
+  printf '{"ok":true,"result":{"terminals":[{"handle":"term-other"},{"handle":"term-new"}]}}\n' > "$RESP/2.out"
+  printf '{"ok":true,"result":{"terminal":{"worktreeId":"repo::/other","tabId":"11111111-1111-4111-8111-111111111111","leafId":"22222222-2222-4222-8222-222222222222","connected":true,"writable":true}}}\n' > "$RESP/3.out"
+  printf '{"ok":true,"result":{"terminal":{"worktreeId":"repo::/scratch","tabId":"11111111-1111-4111-8111-111111111111","leafId":"22222222-2222-4222-8222-222222222222","connected":true,"writable":true}}}\n' > "$RESP/4.out"
+  printf '{"ok":true,"result":{"terminal":{"tail":["recovered output"]}}}\n' > "$RESP/5.out"
+  out=$( PATH="$FB:$PATH" FM_ORCA_LOG="$LOG" FM_ORCA_RESPONSES="$RESP" FM_STATE_OVERRIDE="$state" \
+    bash -c '. "$0/bin/fm-backend.sh"; fm_backend_capture orca term-old 5' "$ROOT" )
+  [ "$out" = "recovered output" ] || fail "recovered capture should retry once on the new handle, got '$out'"
+  assert_grep 'terminal=term-new' "$meta" "recovery did not rewrite terminal metadata"
+  [ "$(grep -c '^terminal=' "$meta")" -eq 1 ] || fail "recovery should leave exactly one terminal field"
+  assert_grep 'orca_pane_key=11111111-1111-4111-8111-111111111111:22222222-2222-4222-8222-222222222222' "$meta" \
+    "recovery changed the durable pane identity"
+  assert_grep 'harness=claude' "$meta" "recovery changed unrelated metadata"
+  log_text=$(cat "$LOG")
+  assert_contains "$log_text" $'orca\x1f''terminal'$'\x1f''list'$'\x1f''--worktree'$'\x1f''id:repo::/scratch'$'\x1f''--json' \
+    "recovery list was not scoped to the recorded worktree"
+  assert_contains "$log_text" $'orca\x1f''terminal'$'\x1f''read'$'\x1f''--terminal'$'\x1f''term-new' \
+    "original operation was not retried against the recovered handle"
+  pass "orca_stale_handle_recovery_adopts_one_connected_match"
+}
+
+orca_stale_handle_recovery_rejects_zero_and_duplicate_matches() {
+  local state meta out status
+  orca_case recovery-zero
+  state="$CASE_DIR/state"
+  meta="$state/recoverzero.meta"
+  orca_recovery_meta "$state" recoverzero term-old \
+    11111111-1111-4111-8111-111111111111:22222222-2222-4222-8222-222222222222
+  printf '{"ok":false,"error":{"code":"terminal_handle_stale"}}\n' > "$RESP/1.out"
+  printf '{"ok":true,"result":{"terminals":[{"handle":"term-other"}]}}\n' > "$RESP/2.out"
+  printf '{"ok":true,"result":{"terminal":{"worktreeId":"repo::/scratch","tabId":"33333333-3333-4333-8333-333333333333","leafId":"44444444-4444-4444-8444-444444444444","connected":true,"writable":true}}}\n' > "$RESP/3.out"
+  out=$( PATH="$FB:$PATH" FM_ORCA_LOG="$LOG" FM_ORCA_RESPONSES="$RESP" FM_STATE_OVERRIDE="$state" \
+    bash -c '. "$0/bin/fm-backend.sh"; fm_backend_capture orca term-old 5' "$ROOT" 2>&1 )
+  status=$?
+  [ "$status" -ne 0 ] || fail "zero-match recovery must fail"
+  assert_contains "$out" "Orca endpoint gone" "zero-match recovery did not report the gone outcome"
+  assert_grep 'terminal=term-old' "$meta" "zero-match recovery changed metadata"
+
+  orca_case recovery-duplicate
+  state="$CASE_DIR/state"
+  meta="$state/recoverdup.meta"
+  orca_recovery_meta "$state" recoverdup term-old \
+    11111111-1111-4111-8111-111111111111:22222222-2222-4222-8222-222222222222
+  printf '{"ok":false,"error":{"code":"terminal_handle_stale"}}\n' > "$RESP/1.out"
+  printf '{"ok":true,"result":{"terminals":[{"handle":"term-a"},{"handle":"term-b"}]}}\n' > "$RESP/2.out"
+  printf '{"ok":true,"result":{"terminal":{"worktreeId":"repo::/scratch","tabId":"11111111-1111-4111-8111-111111111111","leafId":"22222222-2222-4222-8222-222222222222","connected":true,"writable":true}}}\n' > "$RESP/3.out"
+  printf '{"ok":true,"result":{"terminal":{"worktreeId":"repo::/scratch","tabId":"11111111-1111-4111-8111-111111111111","leafId":"22222222-2222-4222-8222-222222222222","connected":true,"writable":true}}}\n' > "$RESP/4.out"
+  out=$( PATH="$FB:$PATH" FM_ORCA_LOG="$LOG" FM_ORCA_RESPONSES="$RESP" FM_STATE_OVERRIDE="$state" \
+    bash -c '. "$0/bin/fm-backend.sh"; fm_backend_capture orca term-old 5' "$ROOT" 2>&1 )
+  status=$?
+  [ "$status" -ne 0 ] || fail "duplicate-match recovery must fail"
+  assert_contains "$out" "recovery ambiguous" "duplicate recovery did not report ambiguity"
+  assert_contains "$out" "term-a term-b" "ambiguous recovery did not name both handles"
+  assert_grep 'terminal=term-old' "$meta" "duplicate recovery changed metadata"
+  pass "orca_stale_handle_recovery_rejects_zero_and_duplicate_matches"
+}
+
+orca_stale_handle_recovery_rejects_disconnected_and_unresolved_candidates() {
+  local state meta out status
+  orca_case recovery-disconnected
+  state="$CASE_DIR/state"
+  meta="$state/recoverdead.meta"
+  orca_recovery_meta "$state" recoverdead term-old \
+    11111111-1111-4111-8111-111111111111:22222222-2222-4222-8222-222222222222
+  printf '{"ok":false,"error":{"code":"terminal_handle_stale"}}\n' > "$RESP/1.out"
+  printf '{"ok":true,"result":{"terminals":[{"handle":"term-dead"}]}}\n' > "$RESP/2.out"
+  printf '{"ok":true,"result":{"terminal":{"worktreeId":"repo::/scratch","tabId":"11111111-1111-4111-8111-111111111111","leafId":"22222222-2222-4222-8222-222222222222","connected":false,"writable":false}}}\n' > "$RESP/3.out"
+  out=$( PATH="$FB:$PATH" FM_ORCA_LOG="$LOG" FM_ORCA_RESPONSES="$RESP" FM_STATE_OVERRIDE="$state" \
+    bash -c '. "$0/bin/fm-backend.sh"; fm_backend_capture orca term-old 5' "$ROOT" 2>&1 )
+  status=$?
+  [ "$status" -ne 0 ] || fail "disconnected recovery candidate must fail"
+  assert_contains "$out" "endpoint disconnected" "disconnected match did not report the dead-endpoint outcome"
+  assert_grep 'terminal=term-old' "$meta" "disconnected recovery changed metadata"
+
+  orca_case recovery-unresolved
+  state="$CASE_DIR/state"
+  meta="$state/recoverunresolved.meta"
+  orca_recovery_meta "$state" recoverunresolved term-old \
+    11111111-1111-4111-8111-111111111111:22222222-2222-4222-8222-222222222222
+  printf '{"ok":false,"error":{"code":"terminal_handle_stale"}}\n' > "$RESP/1.out"
+  printf '{"ok":true,"result":{"terminals":[{"handle":"term-unreadable"},{"handle":"term-other"}]}}\n' > "$RESP/2.out"
+  printf '{"ok":false,"error":{"code":"runtime_unavailable"}}\n' > "$RESP/3.out"
+  printf '{"ok":true,"result":{"terminal":{"worktreeId":"repo::/scratch","tabId":"33333333-3333-4333-8333-333333333333","leafId":"44444444-4444-4444-8444-444444444444","connected":true,"writable":true}}}\n' > "$RESP/4.out"
+  out=$( PATH="$FB:$PATH" FM_ORCA_LOG="$LOG" FM_ORCA_RESPONSES="$RESP" FM_STATE_OVERRIDE="$state" \
+    bash -c '. "$0/bin/fm-backend.sh"; fm_backend_capture orca term-old 5' "$ROOT" 2>&1 )
+  status=$?
+  [ "$status" -ne 0 ] || fail "one unreadable candidate must fail the entire recovery"
+  assert_contains "$out" "recovery unresolved" "unreadable candidate did not report unresolved"
+  assert_contains "$(cat "$LOG")" $'orca\x1f''terminal'$'\x1f''show'$'\x1f''--terminal'$'\x1f''term-other' \
+    "recovery stopped enumerating after an unreadable candidate"
+  assert_grep 'terminal=term-old' "$meta" "unresolved recovery changed metadata"
+  pass "orca_stale_handle_recovery_rejects_disconnected_and_unresolved_candidates"
+}
+
+orca_terminal_metadata_update_uses_shared_lock() {
+  local state meta holder setter pr_writer x_writer promote_writer
+  orca_case recovery-meta-lock
+  state="$CASE_DIR/state"
+  meta="$state/recoverlock.meta"
+  orca_recovery_meta "$state" recoverlock term-old \
+    11111111-1111-4111-8111-111111111111:22222222-2222-4222-8222-222222222222
+  PATH="$FB:$PATH" FM_STATE_OVERRIDE="$state" bash -c '
+    . "$0/bin/fm-wake-lib.sh"
+    fm_lock_acquire_wait "$1.lock"
+    : > "$2"
+    while [ ! -f "$3" ]; do sleep 0.01; done
+    fm_lock_release "$1.lock"
+  ' "$ROOT" "$meta" "$CASE_DIR/locked" "$CASE_DIR/release" &
+  holder=$!
+  while [ ! -f "$CASE_DIR/locked" ]; do sleep 0.01; done
+  PATH="$FB:$PATH" FM_STATE_OVERRIDE="$state" bash -c '
+    . "$0/bin/backends/orca.sh"
+    fm_backend_orca_meta_set_terminal "$1" term-old repo::/scratch \
+      11111111-1111-4111-8111-111111111111:22222222-2222-4222-8222-222222222222 fixture-recoverlock term-new
+  ' "$ROOT" "$meta" &
+  setter=$!
+  FM_ROOT_OVERRIDE="$ROOT" FM_STATE_OVERRIDE="$state" \
+    "$ROOT/bin/fm-pr-check.sh" recoverlock https://github.com/example/repo/pull/1 >/dev/null &
+  pr_writer=$!
+  FM_STATE_OVERRIDE="$state" bash -c '
+    . "$0/bin/fm-x-lib.sh"
+    fmx_meta_link_set "$1" request-1 1
+  ' "$ROOT" "$meta" &
+  x_writer=$!
+  FM_ROOT_OVERRIDE="$ROOT" FM_STATE_OVERRIDE="$state" \
+    "$ROOT/bin/fm-promote.sh" recoverlock >/dev/null 2>&1 &
+  promote_writer=$!
+  sleep 0.05
+  kill -0 "$setter" 2>/dev/null || fail "terminal metadata update did not wait for the shared lock"
+  kill -0 "$pr_writer" 2>/dev/null || fail "PR metadata append did not wait for the shared lock"
+  kill -0 "$x_writer" 2>/dev/null || fail "X metadata rewrite did not wait for the shared lock"
+  kill -0 "$promote_writer" 2>/dev/null || fail "promotion metadata rewrite did not wait for the shared lock"
+  : > "$CASE_DIR/release"
+  wait "$holder" || fail "metadata lock holder failed"
+  wait "$setter" || fail "terminal metadata update failed after lock release"
+  wait "$pr_writer" || fail "PR metadata append failed after lock release"
+  wait "$x_writer" || fail "X metadata rewrite failed after lock release"
+  wait "$promote_writer" || fail "promotion metadata rewrite failed after lock release"
+  assert_grep 'terminal=term-new' "$meta" "locked metadata update did not replace the terminal"
+  assert_grep 'pr=https://github.com/example/repo/pull/1' "$meta" "locked metadata update lost an unrelated append"
+  assert_grep 'x_request=request-1' "$meta" "locked metadata update lost X metadata"
+  assert_grep 'kind=ship' "$meta" "locked metadata update lost promotion metadata"
+  pass "orca_terminal_metadata_update_uses_shared_lock"
+}
+
+orca_terminal_metadata_cas_rejects_reused_task() {
+  local state meta status
+  orca_case recovery-meta-cas
+  state="$CASE_DIR/state"
+  meta="$state/recovercas.meta"
+  orca_recovery_meta "$state" recovercas term-replacement \
+    33333333-3333-4333-8333-333333333333:44444444-4444-4444-8444-444444444444
+  sed -i.bak 's#orca_worktree_id=repo::/scratch#orca_worktree_id=repo::/replacement#' "$meta"
+  rm -f "$meta.bak"
+  if FM_STATE_OVERRIDE="$state" bash -c '
+    . "$0/bin/backends/orca.sh"
+    fm_backend_orca_meta_set_terminal "$1" term-old repo::/scratch \
+      11111111-1111-4111-8111-111111111111:22222222-2222-4222-8222-222222222222 fixture-recovercas term-new
+  ' "$ROOT" "$meta"; then status=0; else status=$?; fi
+  [ "$status" -ne 0 ] || fail "terminal metadata CAS accepted a replacement task identity"
+  assert_grep 'terminal=term-replacement' "$meta" "terminal metadata CAS overwrote a replacement task"
+  assert_grep 'orca_worktree_id=repo::/replacement' "$meta" "terminal metadata CAS changed replacement worktree identity"
+  pass "orca_terminal_metadata_cas_rejects_reused_task"
+}
+
+orca_terminal_metadata_delete_prevents_resurrection() {
+  local state meta holder setter status
+  orca_case recovery-meta-delete
+  state="$CASE_DIR/state"
+  meta="$state/recoverdelete.meta"
+  orca_recovery_meta "$state" recoverdelete term-old \
+    11111111-1111-4111-8111-111111111111:22222222-2222-4222-8222-222222222222
+  FM_STATE_OVERRIDE="$state" bash -c '
+    . "$0/bin/fm-meta-lib.sh"
+    fm_meta_lock_acquire "$1"
+    : > "$2"
+    while [ ! -f "$3" ]; do sleep 0.01; done
+    rm -f "$1"
+    fm_meta_lock_release "$1"
+  ' "$ROOT" "$meta" "$CASE_DIR/locked" "$CASE_DIR/delete" &
+  holder=$!
+  while [ ! -f "$CASE_DIR/locked" ]; do sleep 0.01; done
+  FM_STATE_OVERRIDE="$state" bash -c '
+    . "$0/bin/backends/orca.sh"
+    fm_backend_orca_meta_set_terminal "$1" term-old repo::/scratch \
+      11111111-1111-4111-8111-111111111111:22222222-2222-4222-8222-222222222222 fixture-recoverdelete term-new
+  ' "$ROOT" "$meta" &
+  setter=$!
+  sleep 0.05
+  kill -0 "$setter" 2>/dev/null || fail "terminal metadata CAS did not wait for teardown deletion"
+  : > "$CASE_DIR/delete"
+  wait "$holder" || fail "teardown metadata deletion failed"
+  if wait "$setter"; then status=0; else status=$?; fi
+  [ "$status" -ne 0 ] || fail "terminal metadata CAS succeeded after teardown deletion"
+  assert_absent "$meta" "terminal metadata CAS resurrected a torn-down task"
+  pass "orca_terminal_metadata_delete_prevents_resurrection"
+}
+
+pr_check_does_not_resurrect_deleted_metadata() {
+  local state meta writer status
+  orca_case pr-check-meta-delete
+  state="$CASE_DIR/state"
+  meta="$state/prdelete.meta"
+  orca_recovery_meta "$state" prdelete term-old \
+    11111111-1111-4111-8111-111111111111:22222222-2222-4222-8222-222222222222
+  mkdir -p "$CASE_DIR/worktree"
+  printf 'worktree=%s\n' "$CASE_DIR/worktree" >> "$meta"
+  cat > "$FB/gh" <<'SH'
+#!/usr/bin/env bash
+: > "$FM_TEST_GH_READY"
+while [ ! -f "$FM_TEST_GH_RELEASE" ]; do sleep 0.01; done
+printf 'deadbeef\n'
+SH
+  chmod +x "$FB/gh"
+  PATH="$FB:$PATH" FM_TEST_GH_READY="$CASE_DIR/gh-ready" FM_TEST_GH_RELEASE="$CASE_DIR/gh-release" \
+    FM_ROOT_OVERRIDE="$ROOT" FM_STATE_OVERRIDE="$state" \
+    "$ROOT/bin/fm-pr-check.sh" prdelete https://github.com/example/repo/pull/2 >/dev/null 2>&1 &
+  writer=$!
+  for _ in $(seq 1 200); do
+    [ -f "$CASE_DIR/gh-ready" ] && break
+    kill -0 "$writer" 2>/dev/null || fail "PR metadata writer exited before its final identity check"
+    sleep 0.01
+  done
+  [ -f "$CASE_DIR/gh-ready" ] || fail "PR metadata writer did not reach the remote-head lookup"
+  FM_STATE_OVERRIDE="$state" bash -c '
+    . "$0/bin/fm-meta-lib.sh"
+    identity=$(fm_meta_identity "$1")
+    fm_meta_remove_if_identity "$1" "$identity"
+  ' "$ROOT" "$meta" || fail "metadata deletion failed"
+  : > "$CASE_DIR/gh-release"
+  if wait "$writer"; then status=0; else status=$?; fi
+  [ "$status" -ne 0 ] || fail "PR metadata writer accepted a deleted task"
+  assert_absent "$meta" "PR metadata writer resurrected a deleted task"
+  assert_absent "$state/prdelete.check.sh" "PR metadata writer armed an orphan poll"
+  pass "fm-pr-check: deleted metadata stays deleted and unarmed"
+}
+
+meta_compare_delete_rejects_replacement_identity() {
+  local state meta identity status
+  orca_case teardown-meta-cas
+  state="$CASE_DIR/state"
+  meta="$state/teardowncas.meta"
+  orca_recovery_meta "$state" teardowncas term-old \
+    11111111-1111-4111-8111-111111111111:22222222-2222-4222-8222-222222222222
+  identity=$(FM_STATE_OVERRIDE="$state" bash -c '. "$0/bin/fm-meta-lib.sh"; fm_meta_identity "$1"' "$ROOT" "$meta")
+  printf 'window=fm-replacement\nworktree=/replacement\nproject=/replacement\nterminal=term-replacement\n' > "$meta"
+  if FM_STATE_OVERRIDE="$state" bash -c '. "$0/bin/fm-meta-lib.sh"; fm_meta_remove_if_identity "$1" "$2"' \
+    "$ROOT" "$meta" "$identity"; then status=0; else status=$?; fi
+  [ "$status" -ne 0 ] || fail "metadata compare-delete accepted a replacement task"
+  assert_grep 'terminal=term-replacement' "$meta" "metadata compare-delete removed the replacement task"
+  pass "teardown metadata compare-delete rejects replacement identity"
+}
+
+teardown_claim_blocks_task_mutations() {
+  local state meta identity owner claimed status
+  orca_case teardown-claim
+  state="$CASE_DIR/state"
+  meta="$state/claim.meta"
+  orca_recovery_meta "$state" claim term-old \
+    11111111-1111-4111-8111-111111111111:22222222-2222-4222-8222-222222222222
+  identity=$(FM_STATE_OVERRIDE="$state" bash -c '. "$0/bin/fm-meta-lib.sh"; fm_meta_identity "$1"' "$ROOT" "$meta")
+  owner='owner-one'
+  claimed=$(FM_STATE_OVERRIDE="$state" bash -c '. "$0/bin/fm-meta-lib.sh"; fm_meta_claim_teardown "$1" "$2" "$3"' \
+    "$ROOT" "$meta" "$identity" "$owner") || fail "teardown could not claim live metadata"
+  assert_grep 'lifecycle=teardown:owner-one' "$meta" "teardown claim was not persisted"
+
+  if FM_STATE_OVERRIDE="$state" bash -c '
+    . "$0/bin/backends/orca.sh"
+    fm_backend_orca_meta_set_terminal "$1" term-old repo::/scratch \
+      11111111-1111-4111-8111-111111111111:22222222-2222-4222-8222-222222222222 fixture-claim term-new
+  ' "$ROOT" "$meta"; then status=0; else status=$?; fi
+  [ "$status" -ne 0 ] || fail "Orca recovery mutated teardown-owned metadata"
+  if FM_ROOT_OVERRIDE="$ROOT" FM_STATE_OVERRIDE="$state" "$ROOT/bin/fm-promote.sh" claim >/dev/null 2>&1; then
+    status=0
+  else
+    status=$?
+  fi
+  [ "$status" -ne 0 ] || fail "promotion mutated teardown-owned metadata"
+  assert_grep 'terminal=term-old' "$meta" "teardown ownership allowed terminal replacement"
+  assert_grep 'kind=scout' "$meta" "teardown ownership allowed promotion"
+  FM_STATE_OVERRIDE="$state" bash -c '. "$0/bin/fm-meta-lib.sh"; fm_meta_remove_if_identity "$1" "$2"' \
+    "$ROOT" "$meta" "$claimed" || fail "teardown owner could not compare-delete its metadata"
+  assert_absent "$meta" "teardown-owned metadata was not removed"
+  pass "teardown ownership blocks recovery and promotion mutations"
+}
+
+orca_recovery_triggers_only_for_stale_and_requires_new_metadata() {
+  local state meta out status log_text
+  orca_case recovery-runtime-unavailable
+  state="$CASE_DIR/state"
+  meta="$state/recoverruntime.meta"
+  orca_recovery_meta "$state" recoverruntime term-old \
+    11111111-1111-4111-8111-111111111111:22222222-2222-4222-8222-222222222222
+  printf '{"ok":false,"error":{"code":"runtime_unavailable","message":"runtime down"}}\n' > "$RESP/1.out"
+  out=$( PATH="$FB:$PATH" FM_ORCA_LOG="$LOG" FM_ORCA_RESPONSES="$RESP" FM_STATE_OVERRIDE="$state" \
+    bash -c '. "$0/bin/fm-backend.sh"; fm_backend_capture orca term-old 5' "$ROOT" 2>&1 )
+  status=$?
+  [ "$status" -ne 0 ] || fail "runtime_unavailable must fail without recovery"
+  assert_contains "$out" "runtime_unavailable" "non-stale error should surface unchanged"
+  log_text=$(cat "$LOG")
+  assert_not_contains "$log_text" $'orca\x1f''terminal'$'\x1f''list' "runtime_unavailable must not trigger recovery"
+
+  orca_case recovery-legacy-meta
+  state="$CASE_DIR/state"
+  mkdir -p "$state"
+  meta="$state/recoverlegacy.meta"
+  printf 'window=fm-recoverlegacy\nbackend=orca\norca_worktree_id=repo::/scratch\nterminal=term-old\n' > "$meta"
+  printf '{"ok":false,"error":{"code":"terminal_handle_stale","message":"legacy stale"}}\n' > "$RESP/1.out"
+  out=$( PATH="$FB:$PATH" FM_ORCA_LOG="$LOG" FM_ORCA_RESPONSES="$RESP" FM_STATE_OVERRIDE="$state" \
+    bash -c '. "$0/bin/fm-backend.sh"; fm_backend_capture orca term-old 5' "$ROOT" 2>&1 )
+  status=$?
+  [ "$status" -ne 0 ] || fail "legacy stale handle should retain the old failure"
+  assert_contains "$out" "legacy stale" "legacy stale error should surface unchanged"
+  assert_not_contains "$(cat "$LOG")" $'orca\x1f''terminal'$'\x1f''list' "legacy metadata must not trigger recovery"
+  assert_grep 'terminal=term-old' "$meta" "legacy failure changed metadata"
+  pass "orca_recovery_triggers_only_for_stale_and_requires_new_metadata"
+}
+
+orca_pane_key_validation_is_strict() {
+  bash -c '
+    . "$0/bin/backends/orca.sh"
+    fm_backend_orca_pane_key_valid "11111111-1111-4111-8111-111111111111:22222222-2222-4222-8222-222222222222"
+    ! fm_backend_orca_pane_key_valid "not-a-uuid:22222222-2222-4222-8222-222222222222"
+    ! fm_backend_orca_pane_key_valid "a:b:c"
+    ! fm_backend_orca_pane_key_valid ":22222222-2222-4222-8222-222222222222"
+    ! fm_backend_orca_pane_key_valid "tab:not-a-uuid"
+    ! fm_backend_orca_pane_key_valid "pty:opaque:22222222-2222-4222-8222-222222222222"
+  ' "$ROOT" || fail "pane key validation accepted an invalid shape or rejected the valid shape"
+  pass "orca_pane_key_validation_is_strict"
+}
+
+# Semantic liveness fixtures mirror the E1b-observed `terminal show` and
+# `worktree ps` shapes. The join is always tabId:leafId, never terminal list.
+orca_snapshot_selects_only_recorded_worktree_and_matching_agent() {
+  local busy log_text
+  orca_case liveness-exact-join
+  printf '{"ok":true,"result":{"terminal":{"worktreeId":"repo::/scratch","tabId":"11111111-1111-4111-8111-111111111111","leafId":"22222222-2222-4222-8222-222222222222","connected":true,"writable":true}}}\n' > "$RESP/1.out"
+  printf '{"ok":true,"result":{"worktrees":[{"worktreeId":"repo::/other","agents":[{"paneKey":"11111111-1111-4111-8111-111111111111:22222222-2222-4222-8222-222222222222","state":"done"}]},{"worktreeId":"repo::/scratch","agents":[{"paneKey":"33333333-3333-4333-8333-333333333333:44444444-4444-4444-8444-444444444444","state":"done"},{"paneKey":"11111111-1111-4111-8111-111111111111:22222222-2222-4222-8222-222222222222","state":"working"}]}]}}\n' > "$RESP/2.out"
+  busy=$( PATH="$FB:$PATH" FM_ORCA_LOG="$LOG" FM_ORCA_RESPONSES="$RESP" \
+    bash -c '. "$0/bin/fm-backend.sh"; fm_backend_busy_state orca term-recorded repo::/scratch' "$ROOT" )
+  [ "$busy" = busy ] || fail "exact recorded worktree/pane join should report busy, got '$busy'"
+  log_text=$(cat "$LOG")
+  assert_contains "$log_text" $'orca\x1f''terminal'$'\x1f''show'$'\x1f''--terminal'$'\x1f''term-recorded'$'\x1f''--json' \
+    "liveness must resolve the exact recorded handle through terminal show"
+  assert_contains "$log_text" $'orca\x1f''worktree'$'\x1f''ps'$'\x1f''--json' \
+    "liveness must read the agent inventory through worktree ps"
+  assert_not_contains "$log_text" $'orca\x1f''terminal'$'\x1f''list' \
+    "liveness must never join through terminal list placeholders"
+  pass "orca_snapshot_selects_only_recorded_worktree_and_matching_agent"
+}
+
+orca_busy_and_alive_map_only_working_and_turn_complete_done() {
+  local busy alive
+  orca_case liveness-working-done
+  printf '{"ok":true,"result":{"terminal":{"worktreeId":"repo::/scratch","tabId":"11111111-1111-4111-8111-111111111111","leafId":"22222222-2222-4222-8222-222222222222","connected":true,"writable":true}}}\n' > "$RESP/1.out"
+  printf '{"ok":true,"result":{"worktrees":[{"worktreeId":"repo::/scratch","agents":[{"paneKey":"11111111-1111-4111-8111-111111111111:22222222-2222-4222-8222-222222222222","state":"working"}]}]}}\n' > "$RESP/2.out"
+  printf '{"ok":true,"result":{"terminal":{"worktreeId":"repo::/scratch","tabId":"11111111-1111-4111-8111-111111111111","leafId":"22222222-2222-4222-8222-222222222222","connected":true,"writable":true}}}\n' > "$RESP/3.out"
+  printf '{"ok":true,"result":{"worktrees":[{"worktreeId":"repo::/scratch","agents":[{"paneKey":"11111111-1111-4111-8111-111111111111:22222222-2222-4222-8222-222222222222","state":"done"}]}]}}\n' > "$RESP/4.out"
+  printf '{"ok":true,"result":{"terminal":{"worktreeId":"repo::/scratch","tabId":"11111111-1111-4111-8111-111111111111","leafId":"22222222-2222-4222-8222-222222222222","connected":true,"writable":true}}}\n' > "$RESP/5.out"
+  printf '{"ok":true,"result":{"worktrees":[{"worktreeId":"repo::/scratch","agents":[{"paneKey":"11111111-1111-4111-8111-111111111111:22222222-2222-4222-8222-222222222222","state":"done"}]}]}}\n' > "$RESP/6.out"
+  busy=$( PATH="$FB:$PATH" FM_ORCA_LOG="$LOG" FM_ORCA_RESPONSES="$RESP" \
+    bash -c '. "$0/bin/fm-backend.sh"; fm_backend_busy_state orca term-recorded repo::/scratch' "$ROOT" )
+  alive=$( PATH="$FB:$PATH" FM_ORCA_LOG="$LOG" FM_ORCA_RESPONSES="$RESP" \
+    bash -c '. "$0/bin/fm-backend.sh"; printf "%s/%s" "$(fm_backend_busy_state orca term-recorded repo::/scratch)" "$(fm_backend_agent_alive orca term-recorded repo::/scratch)"' "$ROOT" )
+  [ "$busy" = busy ] || fail "working agent should report busy, got '$busy'"
+  [ "$alive" = idle/alive ] || fail "turn-complete done agent should report idle/alive, got '$alive'"
+  pass "orca_busy_and_alive_map_only_working_and_turn_complete_done"
+}
+
+orca_agent_disappearance_after_exit_reports_dead() {
+  local alive
+  orca_case liveness-exited
+  printf '{"ok":true,"result":{"terminal":{"worktreeId":"repo::/scratch","tabId":"11111111-1111-4111-8111-111111111111","leafId":"22222222-2222-4222-8222-222222222222","connected":true,"writable":true}}}\n' > "$RESP/1.out"
+  printf '{"ok":true,"result":{"worktrees":[{"worktreeId":"repo::/scratch","agents":[]}]}}\n' > "$RESP/2.out"
+  alive=$( PATH="$FB:$PATH" FM_ORCA_LOG="$LOG" FM_ORCA_RESPONSES="$RESP" \
+    bash -c '. "$0/bin/fm-backend.sh"; fm_backend_agent_alive orca term-recorded repo::/scratch' "$ROOT" )
+  [ "$alive" = dead ] || fail "E1b-proven agent disappearance in a connected writable terminal should report dead, got '$alive'"
+  pass "orca_agent_disappearance_after_exit_reports_dead"
+}
+
+orca_attention_states_are_alive_and_distinguishable() {
+  local out state n
+  for state in waiting blocked; do
+    orca_case "liveness-attention-$state"
+    n=1
+    while [ "$n" -le 5 ]; do
+      printf '{"ok":true,"result":{"terminal":{"worktreeId":"repo::/scratch","tabId":"11111111-1111-4111-8111-111111111111","leafId":"22222222-2222-4222-8222-222222222222","connected":true,"writable":true}}}\n' > "$RESP/$n.out"
+      n=$((n + 1))
+      printf '{"ok":true,"result":{"worktrees":[{"worktreeId":"repo::/scratch","agents":[{"paneKey":"11111111-1111-4111-8111-111111111111:22222222-2222-4222-8222-222222222222","state":"%s"}]}]}}\n' "$state" > "$RESP/$n.out"
+      n=$((n + 1))
+    done
+    out=$( PATH="$FB:$PATH" FM_ORCA_LOG="$LOG" FM_ORCA_RESPONSES="$RESP" \
+      bash -c '. "$0/bin/fm-backend.sh"; printf "%s/%s/%s" "$(fm_backend_busy_state orca term-recorded repo::/scratch)" "$(fm_backend_attention_state orca term-recorded repo::/scratch)" "$(fm_backend_agent_alive orca term-recorded repo::/scratch)"' "$ROOT" )
+    [ "$out" = "attention/$state/alive" ] || fail "$state must be alive attention with preserved detail, got '$out'"
+  done
+  pass "orca_attention_states_are_alive_and_distinguishable"
+}
+
+orca_parent_child_inventory_selects_only_exact_coordinator_pane() {
+  local state
+  orca_case liveness-parent-child
+  printf '{"ok":true,"result":{"terminal":{"worktreeId":"repo::/scratch","tabId":"11111111-1111-4111-8111-111111111111","leafId":"22222222-2222-4222-8222-222222222222","connected":true,"writable":true}}}\n' > "$RESP/1.out"
+  printf '{"ok":true,"result":{"worktrees":[{"worktreeId":"repo::/scratch","agents":[{"paneKey":"33333333-3333-4333-8333-333333333333:44444444-4444-4444-8444-444444444444","state":"working","parentPaneKey":"11111111-1111-4111-8111-111111111111:22222222-2222-4222-8222-222222222222"},{"paneKey":"11111111-1111-4111-8111-111111111111:22222222-2222-4222-8222-222222222222","state":"waiting"}]}]}}\n' > "$RESP/2.out"
+  state=$( PATH="$FB:$PATH" FM_ORCA_LOG="$LOG" FM_ORCA_RESPONSES="$RESP" \
+    bash -c '. "$0/bin/fm-backend.sh"; fm_backend_attention_state orca term-recorded repo::/scratch' "$ROOT" )
+  [ "$state" = waiting ] || fail "parent/child relation overrode exact coordinator paneKey equality: '$state'"
+  pass "orca_parent_child_inventory_selects_only_exact_coordinator_pane"
+}
+
+orca_snapshot_rejects_cross_worktree_placeholder_and_duplicates() {
+  local cross placeholder duplicate_worktrees duplicate_agents
+  orca_case liveness-identity-rejections
+  printf '{"ok":true,"result":{"terminal":{"worktreeId":"repo::/other","tabId":"11111111-1111-4111-8111-111111111111","leafId":"22222222-2222-4222-8222-222222222222","connected":true,"writable":true}}}\n' > "$RESP/1.out"
+  printf '{"ok":true,"result":{"terminal":{"worktreeId":"repo::/scratch","tabId":"pty:opaque","leafId":"pty:opaque","connected":true,"writable":true}}}\n' > "$RESP/2.out"
+  printf '{"ok":true,"result":{"terminal":{"worktreeId":"repo::/scratch","tabId":"11111111-1111-4111-8111-111111111111","leafId":"22222222-2222-4222-8222-222222222222","connected":true,"writable":true}}}\n' > "$RESP/3.out"
+  printf '{"ok":true,"result":{"worktrees":[{"worktreeId":"repo::/scratch","agents":[]},{"worktreeId":"repo::/scratch","agents":[]}]}}\n' > "$RESP/4.out"
+  printf '{"ok":true,"result":{"terminal":{"worktreeId":"repo::/scratch","tabId":"11111111-1111-4111-8111-111111111111","leafId":"22222222-2222-4222-8222-222222222222","connected":true,"writable":true}}}\n' > "$RESP/5.out"
+  printf '{"ok":true,"result":{"worktrees":[{"worktreeId":"repo::/scratch","agents":[{"paneKey":"11111111-1111-4111-8111-111111111111:22222222-2222-4222-8222-222222222222","state":"working"},{"paneKey":"11111111-1111-4111-8111-111111111111:22222222-2222-4222-8222-222222222222","state":"done"}]}]}}\n' > "$RESP/6.out"
+  cross=$( PATH="$FB:$PATH" FM_ORCA_LOG="$LOG" FM_ORCA_RESPONSES="$RESP" \
+    bash -c '. "$0/bin/fm-backend.sh"; fm_backend_agent_alive orca term-recorded repo::/scratch' "$ROOT" )
+  placeholder=$( PATH="$FB:$PATH" FM_ORCA_LOG="$LOG" FM_ORCA_RESPONSES="$RESP" \
+    bash -c '. "$0/bin/fm-backend.sh"; fm_backend_agent_alive orca term-recorded repo::/scratch' "$ROOT" )
+  duplicate_worktrees=$( PATH="$FB:$PATH" FM_ORCA_LOG="$LOG" FM_ORCA_RESPONSES="$RESP" \
+    bash -c '. "$0/bin/fm-backend.sh"; fm_backend_agent_alive orca term-recorded repo::/scratch' "$ROOT" )
+  duplicate_agents=$( PATH="$FB:$PATH" FM_ORCA_LOG="$LOG" FM_ORCA_RESPONSES="$RESP" \
+    bash -c '. "$0/bin/fm-backend.sh"; fm_backend_agent_alive orca term-recorded repo::/scratch' "$ROOT" )
+  [ "$cross/$placeholder/$duplicate_worktrees/$duplicate_agents" = unknown/unknown/unknown/unknown ] \
+    || fail "cross-worktree, placeholder, and duplicate identities must all remain unknown"
+  pass "orca_snapshot_rejects_cross_worktree_placeholder_and_duplicates"
+}
+
+orca_snapshot_rejects_errors_malformed_json_and_unknown_states() {
+  local show_error malformed_show ps_error malformed_ps unknown_state disconnected null_agent empty_agent unrelated_agent
+  orca_case liveness-invalid-results
+  printf '{"ok":false,"error":{"code":"terminal_handle_stale"}}\n' > "$RESP/1.out"
+  printf '{not-json\n' > "$RESP/2.out"
+  printf '{"ok":true,"result":{"terminal":{"worktreeId":"repo::/scratch","tabId":"11111111-1111-4111-8111-111111111111","leafId":"22222222-2222-4222-8222-222222222222","connected":true,"writable":true}}}\n' > "$RESP/3.out"
+  printf '{"ok":false,"error":{"code":"runtime_unavailable"}}\n' > "$RESP/4.out"
+  printf '{"ok":true,"result":{"terminal":{"worktreeId":"repo::/scratch","tabId":"11111111-1111-4111-8111-111111111111","leafId":"22222222-2222-4222-8222-222222222222","connected":true,"writable":true}}}\n' > "$RESP/5.out"
+  printf '{not-json\n' > "$RESP/6.out"
+  printf '{"ok":true,"result":{"terminal":{"worktreeId":"repo::/scratch","tabId":"11111111-1111-4111-8111-111111111111","leafId":"22222222-2222-4222-8222-222222222222","connected":true,"writable":true}}}\n' > "$RESP/7.out"
+  printf '{"ok":true,"result":{"worktrees":[{"worktreeId":"repo::/scratch","agents":[{"paneKey":"11111111-1111-4111-8111-111111111111:22222222-2222-4222-8222-222222222222","state":"mystery"}]}]}}\n' > "$RESP/8.out"
+  printf '{"ok":true,"result":{"terminal":{"worktreeId":"repo::/scratch","tabId":"11111111-1111-4111-8111-111111111111","leafId":"22222222-2222-4222-8222-222222222222","connected":false,"writable":true}}}\n' > "$RESP/9.out"
+  printf '{"ok":true,"result":{"terminal":{"worktreeId":"repo::/scratch","tabId":"11111111-1111-4111-8111-111111111111","leafId":"22222222-2222-4222-8222-222222222222","connected":true,"writable":true}}}\n' > "$RESP/10.out"
+  printf '{"ok":true,"result":{"worktrees":[{"worktreeId":"repo::/scratch","agents":[null]}]}}\n' > "$RESP/11.out"
+  printf '{"ok":true,"result":{"terminal":{"worktreeId":"repo::/scratch","tabId":"11111111-1111-4111-8111-111111111111","leafId":"22222222-2222-4222-8222-222222222222","connected":true,"writable":true}}}\n' > "$RESP/12.out"
+  printf '{"ok":true,"result":{"worktrees":[{"worktreeId":"repo::/scratch","agents":[{}]}]}}\n' > "$RESP/13.out"
+  printf '{"ok":true,"result":{"terminal":{"worktreeId":"repo::/scratch","tabId":"11111111-1111-4111-8111-111111111111","leafId":"22222222-2222-4222-8222-222222222222","connected":true,"writable":true}}}\n' > "$RESP/14.out"
+  printf '{"ok":true,"result":{"worktrees":[{"worktreeId":"repo::/scratch","agents":[{"paneKey":"33333333-3333-4333-8333-333333333333:44444444-4444-4444-8444-444444444444","state":"working"}]}]}}\n' > "$RESP/15.out"
+  show_error=$( PATH="$FB:$PATH" FM_ORCA_LOG="$LOG" FM_ORCA_RESPONSES="$RESP" bash -c '. "$0/bin/fm-backend.sh"; fm_backend_agent_alive orca term repo::/scratch' "$ROOT" )
+  malformed_show=$( PATH="$FB:$PATH" FM_ORCA_LOG="$LOG" FM_ORCA_RESPONSES="$RESP" bash -c '. "$0/bin/fm-backend.sh"; fm_backend_agent_alive orca term repo::/scratch' "$ROOT" )
+  ps_error=$( PATH="$FB:$PATH" FM_ORCA_LOG="$LOG" FM_ORCA_RESPONSES="$RESP" bash -c '. "$0/bin/fm-backend.sh"; fm_backend_agent_alive orca term repo::/scratch' "$ROOT" )
+  malformed_ps=$( PATH="$FB:$PATH" FM_ORCA_LOG="$LOG" FM_ORCA_RESPONSES="$RESP" bash -c '. "$0/bin/fm-backend.sh"; fm_backend_agent_alive orca term repo::/scratch' "$ROOT" )
+  unknown_state=$( PATH="$FB:$PATH" FM_ORCA_LOG="$LOG" FM_ORCA_RESPONSES="$RESP" bash -c '. "$0/bin/fm-backend.sh"; fm_backend_agent_alive orca term repo::/scratch' "$ROOT" )
+  disconnected=$( PATH="$FB:$PATH" FM_ORCA_LOG="$LOG" FM_ORCA_RESPONSES="$RESP" bash -c '. "$0/bin/fm-backend.sh"; fm_backend_agent_alive orca term repo::/scratch' "$ROOT" )
+  null_agent=$( PATH="$FB:$PATH" FM_ORCA_LOG="$LOG" FM_ORCA_RESPONSES="$RESP" bash -c '. "$0/bin/fm-backend.sh"; fm_backend_agent_alive orca term repo::/scratch' "$ROOT" )
+  empty_agent=$( PATH="$FB:$PATH" FM_ORCA_LOG="$LOG" FM_ORCA_RESPONSES="$RESP" bash -c '. "$0/bin/fm-backend.sh"; fm_backend_agent_alive orca term repo::/scratch' "$ROOT" )
+  unrelated_agent=$( PATH="$FB:$PATH" FM_ORCA_LOG="$LOG" FM_ORCA_RESPONSES="$RESP" bash -c '. "$0/bin/fm-backend.sh"; fm_backend_agent_alive orca term repo::/scratch' "$ROOT" )
+  [ "$show_error/$malformed_show/$ps_error/$malformed_ps/$unknown_state/$disconnected/$null_agent/$empty_agent/$unrelated_agent" = unknown/unknown/unknown/unknown/unknown/unknown/unknown/unknown/unknown ] \
+    || fail "all error, malformed, unknown-state, and disconnected shapes must remain unknown"
+  pass "orca_snapshot_rejects_errors_malformed_json_and_unknown_states"
+}
+
+non_orca_backend_busy_and_liveness_dispatch_remain_unchanged() {
+  local out
+  out=$(bash -c '
+    . "$0/bin/fm-backend.sh"
+    fm_backend_source() { return 0; }
+    fm_backend_herdr_busy_state() { printf busy; }
+    fm_backend_herdr_agent_alive() { printf alive; }
+    printf "%s/%s/%s/%s/%s/%s" \
+      "$(fm_backend_busy_state herdr session:pane)" \
+      "$(fm_backend_agent_alive herdr session:pane)" \
+      "$(fm_backend_busy_state tmux session:pane)" \
+      "$(fm_backend_busy_state zellij session:pane)" \
+      "$(fm_backend_agent_alive cmux workspace:surface)" \
+      "$(fm_backend_attention_state herdr session:pane)"
+  ' "$ROOT")
+  [ "$out" = busy/alive/unknown/unknown/unknown/unknown ] || fail "non-Orca dispatcher behavior changed: $out"
+  pass "non_orca_backend_busy_and_liveness_dispatch_remain_unchanged"
+}
+
+orca_target_metadata_lookup_requires_one_exact_record() {
+  local state out status
+  state="$TMP_ROOT/orca-meta-lookup"
+  mkdir -p "$state"
+  fm_write_meta "$state/cross.meta" "backend=tmux" "window=term-shared" "terminal=term-shared"
+  fm_write_meta "$state/window-only.meta" "backend=orca" "window=term-shared" "terminal=term-other"
+  fm_write_meta "$state/exact.meta" "backend=orca" "window=fm-exact" "terminal=term-shared"
+  out=$(FM_STATE_OVERRIDE="$state" bash -c '. "$0/bin/fm-backend.sh"; fm_backend_orca_meta_for_target term-shared' "$ROOT")
+  [ "$out" = "$state/exact.meta" ] || fail "Orca lookup accepted a window or cross-backend collision: $out"
+  fm_write_meta "$state/duplicate.meta" "backend=orca" "window=fm-duplicate" "terminal=term-shared"
+  if FM_STATE_OVERRIDE="$state" bash -c '. "$0/bin/fm-backend.sh"; fm_backend_orca_meta_for_target term-shared' "$ROOT" >/dev/null; then
+    status=0
+  else
+    status=$?
+  fi
+  [ "$status" -ne 0 ] || fail "Orca lookup accepted duplicate exact terminal records"
+  pass "Orca metadata lookup requires one exact backend terminal record"
+}
+
+metadata_generation_validates_uuidgen_output() {
+  local fake value
+  fake="$TMP_ROOT/invalid-uuidgen"
+  mkdir -p "$fake"
+  cat > "$fake/uuidgen" <<'SH'
+#!/usr/bin/env bash
+exit 0
+SH
+  chmod +x "$fake/uuidgen"
+  value=$(PATH="$fake:$PATH" bash -c '. "$0/bin/fm-meta-lib.sh"; fm_meta_new_generation' "$ROOT") || fail "generation fallback failed"
+  printf '%s\n' "$value" | grep -Eq '^[0-9a-f]{32}$' || fail "generation accepted empty uuidgen output: $value"
+  pass "metadata generation rejects empty uuidgen output"
+}
+
+teardown_ownership_requires_explicit_dead_owner_resume() {
+  local state meta identity owner token claimed resumed status
+  state="$TMP_ROOT/teardown-resume"
+  meta="$state/task.meta"
+  mkdir -p "$state"
+  fm_write_meta "$meta" "generation=task-one" "kind=scout" "window=fm-task"
+  identity=$(bash -c '. "$0/bin/fm-meta-lib.sh"; fm_meta_identity "$1"' "$ROOT" "$meta")
+  owner=$(bash -c '. "$0/bin/fm-meta-lib.sh"; fm_meta_teardown_owner' "$ROOT")
+  token=${owner%%:*}
+  claimed=$(bash -c '. "$0/bin/fm-meta-lib.sh"; fm_meta_claim_teardown "$1" "$2" "$3"' "$ROOT" "$meta" "$identity" "$owner") || fail "initial teardown claim failed"
+  if bash -c '. "$0/bin/fm-meta-lib.sh"; next=$(fm_meta_teardown_owner wrong); fm_meta_claim_teardown "$1" "$2" "$next" wrong' \
+    "$ROOT" "$meta" "$claimed" >/dev/null; then status=0; else status=$?; fi
+  [ "$status" -ne 0 ] || fail "teardown ownership resumed with the wrong token"
+  resumed=$(bash -c '. "$0/bin/fm-meta-lib.sh"; next=$(fm_meta_teardown_owner "$3"); fm_meta_claim_teardown "$1" "$2" "$next" "$3"' \
+    "$ROOT" "$meta" "$claimed" "$token") || fail "dead teardown owner could not be explicitly resumed"
+  assert_contains "$resumed" "lifecycle=teardown:$token:" "resumed teardown did not preserve its owner token"
+
+  fm_write_meta "$meta" "generation=task-two" "kind=scout" "window=fm-task"
+  if bash -c '
+    . "$0/bin/fm-meta-lib.sh"
+    identity=$(fm_meta_identity "$1")
+    owner=$(fm_meta_teardown_owner live)
+    claimed=$(fm_meta_claim_teardown "$1" "$identity" "$owner")
+    next=$(fm_meta_teardown_owner live)
+    fm_meta_claim_teardown "$1" "$claimed" "$next" live
+  ' "$ROOT" "$meta" >/dev/null; then status=0; else status=$?; fi
+  [ "$status" -ne 0 ] || fail "teardown ownership took over a live owner"
+  pass "teardown ownership resumes only explicit dead owners"
+}
+
+forced_secondmate_cleanup_claims_all_children_before_kill() {
+  local home subhome state fake neutral out status
+  home="$TMP_ROOT/claimed-children-home"
+  subhome="$TMP_ROOT/claimed-children-secondmate"
+  state="$home/state"
+  fake="$TMP_ROOT/claimed-children-fake"
+  mkdir -p "$state" "$home/data" "$subhome/bin" "$subhome/data" "$subhome/state" "$subhome/config" "$subhome/projects" "$fake"
+  printf 'parent\n' > "$subhome/.fm-secondmate-home"
+  printf '# Firstmate\n' > "$subhome/AGENTS.md"
+  fm_write_meta "$state/parent.meta" "generation=parent-generation" "window=firstmate:fm-parent" \
+    "worktree=$subhome" "project=$subhome" "kind=secondmate" "mode=secondmate" "home=$subhome"
+  fm_write_meta "$subhome/state/child-a.meta" "generation=child-a-generation" "window=firstmate:fm-child-a" "kind=scout"
+  fm_write_meta "$subhome/state/child-b.meta" "generation=child-b-generation" "window=firstmate:fm-child-b" "kind=scout"
+  cat > "$fake/tmux" <<'SH'
+#!/usr/bin/env bash
+set -u
+case "${1:-}" in
+  kill-window)
+    case "${3:-}" in
+      firstmate:fm-parent) : > "$FM_TEST_PARENT_KILLED" ;;
+      firstmate:fm-child-*)
+        if grep -q '^lifecycle=teardown:' "$FM_TEST_CHILD_A" && grep -q '^lifecycle=teardown:' "$FM_TEST_CHILD_B"; then
+          : > "$FM_TEST_ALL_CHILDREN_CLAIMED"
+        fi
+        if [ -f "$FM_TEST_ALL_CHILDREN_CLAIMED" ]; then
+          printf '%s\n' "${3:-}" >> "$FM_TEST_CHILD_KILLS"
+        fi
+        ;;
+    esac
+    ;;
+  display-message)
+    [ ! -f "$FM_TEST_PARENT_KILLED" ]
+    ;;
+esac
+SH
+  chmod +x "$fake/tmux"
+  neutral=$(neutral_fm_root "$TMP_ROOT/claimed-children-neutral")
+  set +e
+  out=$(PATH="$fake:$PATH" FM_ROOT_OVERRIDE="$neutral" FM_HOME="$home" \
+    FM_TEST_PARENT_KILLED="$TMP_ROOT/claimed-parent-killed" \
+    FM_TEST_ALL_CHILDREN_CLAIMED="$TMP_ROOT/claimed-all-children" \
+    FM_TEST_CHILD_A="$subhome/state/child-a.meta" FM_TEST_CHILD_B="$subhome/state/child-b.meta" \
+    FM_TEST_CHILD_KILLS="$TMP_ROOT/claimed-child-kills" \
+    "$ROOT/bin/fm-teardown.sh" parent --force 2>&1)
+  status=$?
+  set -e
+  expect_code 0 "$status" "forced secondmate teardown should succeed after claiming children"$'\n'"$out"
+  assert_present "$TMP_ROOT/claimed-parent-killed" "forced cleanup did not quiesce the parent first"
+  assert_grep 'firstmate:fm-child-a' "$TMP_ROOT/claimed-child-kills" "child A was killed before every child was claimed"
+  assert_grep 'firstmate:fm-child-b' "$TMP_ROOT/claimed-child-kills" "child B was killed before every child was claimed"
+  pass "forced secondmate cleanup quiesces parent and claims every child"
+}
+
 test_capture_reads_terminal_tail_json
 test_capture_falls_back_to_text_fields
 test_capture_fails_on_orca_error_json
 test_runtime_check_accepts_ready_orca_status
 test_runtime_check_refuses_unready_orca_status
+test_worktree_presence_taxonomy_is_strict_and_endpoint_independent
 test_send_text_submit_verifies_empty_composer_after_enter
 test_send_text_submit_keeps_current_tail_when_limited
 test_send_text_submit_retries_when_composer_stays_pending
@@ -1294,25 +2152,54 @@ test_remove_worktree_refuses_empty_id
 test_remove_worktree_rejects_orca_error_json
 test_worktree_path_resolves_id
 test_dispatcher_sources_orca_and_routes_primitives
+test_spawn_falls_back_to_terminal_show_for_pane_key
+test_spawn_rejects_placeholder_pane_key_without_failing
+orca_stale_handle_recovery_adopts_one_connected_match
+orca_stale_handle_recovery_rejects_zero_and_duplicate_matches
+orca_stale_handle_recovery_rejects_disconnected_and_unresolved_candidates
+orca_terminal_metadata_update_uses_shared_lock
+orca_terminal_metadata_cas_rejects_reused_task
+orca_terminal_metadata_delete_prevents_resurrection
+pr_check_does_not_resurrect_deleted_metadata
+meta_compare_delete_rejects_replacement_identity
+teardown_claim_blocks_task_mutations
+orca_recovery_triggers_only_for_stale_and_requires_new_metadata
+orca_pane_key_validation_is_strict
+orca_snapshot_selects_only_recorded_worktree_and_matching_agent
+orca_busy_and_alive_map_only_working_and_turn_complete_done
+orca_attention_states_are_alive_and_distinguishable
+orca_parent_child_inventory_selects_only_exact_coordinator_pane
+orca_agent_disappearance_after_exit_reports_dead
+orca_snapshot_rejects_cross_worktree_placeholder_and_duplicates
+orca_snapshot_rejects_errors_malformed_json_and_unknown_states
+non_orca_backend_busy_and_liveness_dispatch_remain_unchanged
+orca_target_metadata_lookup_requires_one_exact_record
+metadata_generation_validates_uuidgen_output
+teardown_ownership_requires_explicit_dead_owner_resume
+forced_secondmate_cleanup_claims_all_children_before_kill
 test_json_get_ignores_undocumented_terminal_id_shapes
 test_worktree_and_terminal_helpers_parse_json
 test_worktree_create_removes_worktree_when_path_missing
 test_spawn_preserves_orca_metadata_when_pathless_worktree_cleanup_fails
 test_spawn_writes_orca_metadata_and_launches_harness
+test_spawn_refuses_existing_metadata_without_overwrite
 test_spawn_refuses_orca_secondmate_before_home_mutation
 test_spawn_refuses_orca_when_runtime_not_ready
 test_spawn_refuses_orca_nonisolated_worktree
 test_spawn_removes_orca_worktree_when_terminal_create_fails
 test_spawn_preserves_orca_metadata_when_abort_cleanup_fails
-test_spawn_releases_orca_resources_when_metadata_write_fails
+test_spawn_refuses_unwritable_metadata_before_orca_mutation
 test_peek_send_and_crew_state_route_through_orca_meta
 test_peek_and_crew_state_fail_closed_on_orca_error_json
+test_crew_state_surfaces_possible_external_destruction
+test_crew_state_skips_inactive_orca_metadata
 test_target_exists_rejects_orca_error_json
 test_scout_teardown_removes_orca_worktree_via_helper
 test_scout_teardown_refuses_orca_id_path_mismatch
 test_teardown_removes_orca_worktree_when_path_missing
 test_teardown_preserves_metadata_when_orca_remove_error_json
 test_scout_teardown_refuses_orca_missing_report_when_path_missing
+test_secondmate_failed_child_cleanup_preserves_claims
 test_ship_teardown_refuses_orca_missing_worktree_path
 test_ship_teardown_removes_orca_worktree_when_id_path_matches
 test_ship_teardown_refuses_orca_unresolvable_worktree_id

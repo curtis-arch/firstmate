@@ -469,7 +469,7 @@ Firstmate's own repo is the exception: its `.no-mistakes/` stays gitignored, unt
 This do-not-fight rule does not license evidence commits in firstmate's own repo.
 
 **yolo (orthogonal).** With `yolo=off` (default) every approval is the captain's: ask-user findings, PR merges, the local-only merge.
-With `yolo=on`, firstmate makes those calls itself without asking - resolve ask-user findings on your judgment, and run `bin/fm-pr-merge.sh <id> <full GitHub PR URL>` / `bin/fm-merge-local.sh` once the work is green/approved - EXCEPT anything destructive, irreversible, or security-sensitive, which still escalates to the captain.
+With `yolo=on`, firstmate makes those calls itself without asking - decide ask-user findings on your judgment under the Validate ownership contract below, and run `bin/fm-pr-merge.sh <id> <full GitHub PR URL>` / `bin/fm-merge-local.sh` once the work is green/approved - EXCEPT anything destructive, irreversible, or security-sensitive, which still escalates to the captain.
 Never merge a red PR even under yolo.
 `bin/fm-pr-merge.sh` always records `pr=` and records `pr_head=` when available before merging, parses the full `https://github.com/<owner>/<repo>/pull/<n>` URL into `gh-axi pr merge <n> --repo <owner>/<repo>`, and defaults to `--squash` unless an explicit merge method is forwarded after `--`; this holds even on a repo with no PR CI where the "checks green" signal that normally triggers `bin/fm-pr-check.sh` never fires - do not call `gh-axi pr merge` directly for a task's PR, or the recording step can be silently skipped and a later `fm-teardown.sh` has nothing to verify a squash merge against.
 After any merge you perform without asking the captain, post a one-line "merged <full PR URL or local main> after checks passed" FYI so the captain keeps a trail.
@@ -479,9 +479,12 @@ After any merge you perform without asking the captain, post a one-line "merged 
 For `no-mistakes`-mode ship tasks, when a crewmate's status says `done`, trigger validation using the crew's harness from `state/<id>.meta`.
 Load `harness-adapters` for the target harness's skill invocation form; natural language also works if uncertain.
 
-The crewmate drives the no-mistakes pipeline (review, test, document, lint, push, PR, CI) itself.
+The task worker that starts a no-mistakes run drives the pipeline (review, test, document, lint, push, PR, CI) itself and owns every `no-mistakes axi run` and `no-mistakes axi respond` call through the next gate or outcome.
 The ship brief intentionally does not restate no-mistakes gate mechanics; it points the crewmate to the version-matched SKILL.md loaded by `/no-mistakes`, `no-mistakes axi run --help`, and per-response `help` lines.
-Firstmate's wrapper stays narrow: `ask-user` findings return through `needs-decision`, captain-owned decisions go back through `no-mistakes axi respond`, crewmate validation avoids `--yes`, and CI-green completion is reported as `done: PR {url} checks green`.
+Firstmate's wrapper stays narrow: `ask-user` findings return through `needs-decision`, and CI-green completion is reported as `done: PR {url} checks green`.
+Firstmate never invokes `no-mistakes axi respond` for a crew-owned run.
+Instead, Firstmate sends the same task worker one exact single-line `fm-send` decision naming the decision key, step, action, finding IDs where applicable, instructions where applicable, and exact command to execute; it requires a matching `resolved` event carrying the same key, forbids `--yes`, and requires the worker to process every synchronous return until completion or a genuinely new escalation.
+After `fm-send` verifies submission, Firstmate immediately resumes fleet supervision.
 That checks-green status is owed at the CI-ready return point, when `/no-mistakes` first reports CI green, not after the monitor-until-merge loop observes the PR merged or closed.
 Use chat for yes/no decisions; use lavish-axi when there are multiple findings or options to triage.
 
@@ -628,7 +631,6 @@ On every verified primary harness, "no turn ends blind" has a structural backsto
 Watcher liveness is harness-aware.
 Do not assume one primary harness can use another harness's foreground or background shape.
 For example, Claude uses a background-notify cycle, while Codex intentionally uses bounded foreground checkpoints.
-A crewmate driving its own `no-mistakes` validation still drives that gate loop synchronously and processes every return, never idle-waiting for its own validation run to advance on its own.
 
 Token discipline: for a crewmate's current state prefer `bin/fm-crew-state.sh <id>`, which looks for a branch-matched run-step before checking pane liveness, then falls back to the pane and log in that cheap-first order and treats the status log's last line as a wake event rather than the current state; default peeks to 40 lines; never stream a pane repeatedly through yourself; batch what you tell the captain.
 The context-% shown in a peek is not actionable as crew health; ignore it and intervene only on real signals (`signal`, `stale`, `needs-decision`, `blocked`), looping or confusion in the pane, or a question the brief already answers.
@@ -639,11 +641,11 @@ Invoke the `/afk` skill when the captain says `/afk`, says they are going afk, `
 The skill owns the full daemon procedure: classification policy, batching, injection hardening, max-defer, verified submit, marker stripping, portable lock, dedupe, target discovery, reliability properties, and `FM_INJECT_SKIP`.
 Inline facts that must survive without a loaded skill:
 
-- Every daemon injection is prefixed with `FM_INJECT_MARK`, ASCII unit separator `0x1f`, so internal escalations are distinguishable from a captain message.
+- Every daemon injection is prefixed with `FM_INJECT_MARK`, U+2063 INVISIBLE SEPARATOR, so internal escalations survive terminal transport and remain distinguishable from a captain message.
 - While `state/.afk` exists, the daemon owns the watcher; do not separately arm `fm-watch-arm.sh` or `fm-watch.sh`.
 - If firstmate receives a marked message while afk is active, it is an internal escalation: stay afk and process it.
 - If the message starts with `/afk`, stay afk and refresh the flag.
-- Any other unmarked message means the captain is back: stop the daemon so its shutdown flush runs while `state/.afk` is still set and clear `state/.afk` last (the `/afk` skill owns this ordering, via `bin/fm-afk-launch.sh stop`; clearing the flag first would make the flush a no-op), flush catch-up from `state/.wake-queue`, `state/.subsuper-escalations`, and `state/.subsuper-inject-wedged`, then resume the emitted primary-harness supervision protocol.
+- Any other unmarked message means the captain is back: load `/afk`, run `bin/fm-afk-return.sh`, and do not process that message as ordinary captain work until its durable catch-up gate clears; the script owns stop ordering, wake draining, and firstmate-actionable blocker precedence.
 - Afk never changes approval authority; PR merges, ask-user findings, destructive actions, irreversible actions, and security-sensitive choices still require the same approval they required before.
 - Bias ambiguous cases toward exit because a present captain beats token savings and a false exit is self-correcting.
 
@@ -750,8 +752,8 @@ If you scaffold without `FM_SECONDMATE_CHARTER`, replace the `{TASK}` placeholde
 Keep the charter focused on persistent responsibility, available project clones, escalation back to the main firstmate status file, and the idle-by-default contract: reconcile only its own in-flight work and then wait, never self-initiating a survey or audit.
 Preserve the requests-from-main-firstmate contract in the charter: marked requests return via status or a doc pointer, while unmarked direct captain messages stay conversational.
 Before seeding, launching, recovering, or handing backlog to a secondmate home, load `secondmate-provisioning`.
-The status-reporting protocol is intentionally sparse: crewmates append status only for supervisor-actionable phase changes, `needs-decision`/`blocked`/`paused`/`done`/`failed`, or the `resolved` line that closes a previously reported decision or blocker, because every append wakes firstmate.
-`bin/fm-classify-lib.sh` owns the keyed open/resolved status contract.
+The status-reporting protocol is intentionally sparse: crewmates append status only for supervisor-actionable phase changes, `needs-decision`/`blocked`/`paused`/`done`/`failed`, or the `resolved` line that closes a previously reported decision, blocker, or material routed-work phase, because every append wakes firstmate.
+`bin/fm-classify-lib.sh` owns the keyed open/resolved status contract, and the generated secondmate charter owns its exact reporting instructions.
 For any generated brief that still contains `{TASK}`, replace it with a clear task description, acceptance criteria, and any constraints or context the crewmate needs before spawning or seeding.
 Adjust the other sections only when the task genuinely deviates from the standard ship-a-new-PR shape (e.g. fixing an existing external PR); the scaffold is the contract, not a suggestion.
 

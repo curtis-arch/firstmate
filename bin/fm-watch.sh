@@ -31,6 +31,8 @@
 #                          wake payload itself, not just repetition, forces a
 #                          closer look instead of another routine supervision
 #                          resume. Unless afk is active.
+#   attention: <window>    a backend-native agent state says the live crew is
+#                          waiting or blocked and needs supervisor attention
 #   check: <script>: <out> per-task check output, always actionable
 #   heartbeat              fleet-scan backstop found an unsurfaced captain-relevant
 #                          status, unless afk is active
@@ -180,8 +182,15 @@ hash_pane() {
 # already read for hashing, so this adds no extra backend calls on the
 # regex-fallback path.
 window_is_busy() {  # <window> <tail40>
-  local w=$1 tail40=$2 bs
-  bs=$(fm_backend_busy_state "$(window_backend "$w")" "$w" 2>/dev/null)
+  local w=$1 tail40=$2 bs backend meta worktree_id
+  backend=$(window_backend "$w")
+  if [ "$backend" = orca ]; then
+    meta=$(fm_backend_meta_for_window "$w" "$STATE" 2>/dev/null || true)
+    worktree_id=$(fm_meta_get "$meta" orca_worktree_id)
+    bs=$(fm_backend_busy_state orca "$w" "$worktree_id" 2>/dev/null)
+  else
+    bs=$(fm_backend_busy_state "$backend" "$w" 2>/dev/null)
+  fi
   case "$bs" in
     busy) return 0 ;;
     idle) return 1 ;;
@@ -189,6 +198,21 @@ window_is_busy() {  # <window> <tail40>
       printf '%s' "$tail40" | grep -v '^[[:space:]]*$' | tail -6 | grep -qiE "$BUSY_REGEX"
       ;;
   esac
+}
+
+# Preserve a backend-native attention detail without teaching the watcher any
+# Orca state names. Backends without this narrow signal report unknown and keep
+# the existing hash/busy fallback behavior.
+window_attention_state() {  # <window> -> waiting|blocked|none|unknown
+  local w=$1 backend meta worktree_id
+  backend=$(window_backend "$w")
+  if [ "$backend" = orca ]; then
+    meta=$(fm_backend_meta_for_window "$w" "$STATE" 2>/dev/null || true)
+    worktree_id=$(fm_meta_get "$meta" orca_worktree_id)
+    fm_backend_attention_state orca "$w" "$worktree_id" 2>/dev/null
+  else
+    printf 'unknown'
+  fi
 }
 
 window_kind() {
@@ -235,6 +259,41 @@ recorded_windows() {
     esac
     seen="$seen|$w|"
     printf '%s\n' "$w"
+  done
+}
+
+# Surface a task-level Orca worktree disappearance independently of terminal
+# liveness. The marker suppresses repeats for the same recorded worktree id;
+# an affirmative present result clears it, while unknown preserves it and takes
+# no action. This makes runtime errors and transient outages fail closed.
+detect_possible_external_destruction() {
+  local meta backend task lifecycle worktree_id worktree project marker verdict reason
+  for meta in "$STATE"/*.meta; do
+    [ -e "$meta" ] || continue
+    backend=$(fm_backend_of_meta "$meta")
+    [ "$backend" = orca ] || continue
+    lifecycle=$(fm_meta_get "$meta" lifecycle)
+    [ -z "$lifecycle" ] || continue
+    task=$(basename "$meta" .meta)
+    worktree_id=$(fm_meta_get "$meta" orca_worktree_id)
+    [ -n "$worktree_id" ] || continue
+    marker="$STATE/.possible-external-destruction-$task"
+    verdict=$(fm_backend_worktree_presence orca "$worktree_id" 2>/dev/null)
+    case "$verdict" in
+      present)
+        rm -f "$marker"
+        ;;
+      possible-external-destruction)
+        [ "$(cat "$marker" 2>/dev/null || true)" = "$worktree_id" ] && continue
+        worktree=$(fm_meta_get "$meta" worktree)
+        project=$(fm_meta_get "$meta" project)
+        reason="possible-external-destruction: task=$task; Orca runtime reachable but recorded worktree=$worktree_id is absent; recovery: inspect task branch/ref (normally fm/$task), project=$project, and recorded path=$worktree before recovery or teardown; do not delete, recreate, reset, or discard automatically"
+        fm_wake_append possible-external-destruction "$task" "$reason" || exit 1
+        printf '%s' "$worktree_id" > "$marker"
+        wake "$reason"
+        ;;
+      *) : ;;
+    esac
   done
 }
 
@@ -626,6 +685,11 @@ while :; do
   # alive. Supervision scripts warn when this goes stale with tasks in flight.
   touch "$STATE/.last-watcher-beat"
 
+  # Task-worktree integrity is checked before endpoint staleness. Orca 1.4.141
+  # can lose a PTY during daemon replacement without a status write, and the
+  # endpoint disappearing is not itself proof of worktree destruction.
+  detect_possible_external_destruction
+
   # Slow per-task checks (firstmate writes these, e.g. a merged-PR poll).
   # Time-based via .last-check mtime so the cadence survives watcher restarts.
   # Evaluated BEFORE the signal scan: wake() exits the cycle, so a check placed
@@ -711,6 +775,7 @@ EOF
   while IFS= read -r w; do
     kind=$(window_kind "$w")
     task=$(window_to_task "$w" "$STATE")
+    backend=$(window_backend "$w")
     key=${w//:/_}
     key=${key//\//_}
     key=${key//./_}
@@ -721,7 +786,24 @@ EOF
     if [ "$kind" = secondmate ] && ! status_is_paused "$last"; then
       continue
     fi
-    tail40=$(fm_backend_capture "$(window_backend "$w")" "$w" 40 "$(window_label "$w")" 2>/dev/null) || continue
+    if [ "$backend" = orca ]; then
+      attention=$(window_attention_state "$w")
+      af=$(printf '%s' "$w" | tr ':/.' '___')
+      af="$STATE/.attention-$af"
+      case "$attention" in
+        waiting|blocked)
+          if [ "$(cat "$af" 2>/dev/null || true)" != "$attention" ]; then
+            reason="attention: $w (agent $attention)"
+            fm_wake_append attention "$w" "$reason" || exit 1
+            printf '%s' "$attention" > "$af"
+            wake "$reason"
+          fi
+          continue
+          ;;
+        *) rm -f "$af" ;;
+      esac
+    fi
+    tail40=$(fm_backend_capture "$backend" "$w" 40 "$(window_label "$w")" 2>/dev/null) || continue
     h=$(printf '%s' "$tail40" | hash_pane)
     key=$(printf '%s' "$w" | tr ':/.' '___')
     hf="$STATE/.hash-$key"

@@ -41,7 +41,7 @@ Pass `--backend orca` for a one-off Orca task, or rely on the already-selected O
 After spawn, check the task with firstmate helpers:
 
 - `bin/fm-peek.sh fm-<id>` for launch failures, trust dialogs, or first output.
-- `state/<id>.meta` for `backend=orca`, `terminal=`, `orca_worktree_id=`, and `worktree=`.
+- `state/<id>.meta` for `backend=orca`, `terminal=`, `orca_pane_key=`, `orca_worktree_id=`, and `worktree=`.
 - `bin/fm-crew-state.sh <id>` when the current run state matters.
 - `bin/fm-watch.sh` whenever there are tasks in flight and this session owns supervision.
 
@@ -56,7 +56,11 @@ Put long instructions in the task brief or a temporary file and point the crewma
 
 When supervising, treat `state/<id>.meta` as the routing record and Orca's own ids as backend implementation details.
 The stable firstmate alias is `fm-<id>`.
-The recorded `terminal=` and `orca_worktree_id=` fields are what backend helpers use under the hood.
+The recorded `terminal=`, `orca_pane_key=`, and `orca_worktree_id=` fields are what backend helpers use under the hood.
+Semantic liveness is exact and fail-closed: the helpers join the recorded worktree and `terminal show` pane identity to one agent, while unknown or ambiguous results retain the existing fallback policy.
+Do not infer agent state from Orca's aggregate worktree status or select the first agent in a worktree.
+On exact stale-handle errors, use the normal Firstmate helpers and let the adapter recover by exact pane identity.
+Never repair `terminal=` manually, search by title, or choose a candidate from Orca ordering.
 
 If `fm-send` fails to submit, do not immediately repeat the same long instruction.
 Peek first, then decide whether the target is busy, waiting on a prompt, stuck behind a popup, or genuinely wedged.
@@ -68,7 +72,7 @@ For a messy Orca-backed task:
 
 1. Read `state/<id>.meta` and the relevant status tail first.
 2. Confirm the task is actually Orca-backed before using Orca-specific assumptions.
-3. Use the recorded `terminal=`, `orca_worktree_id=`, and `worktree=` as the task identity.
+3. Use the recorded `terminal=`, `orca_pane_key=`, `orca_worktree_id=`, and `worktree=` as the task identity.
 4. Prefer firstmate helpers for peek, send, state, and teardown.
 5. Avoid raw deletion of Orca worktrees or manual branch cleanup.
 6. Stop and inspect if the recorded worktree path, Orca worktree id, or project checkout no longer matches expectations.

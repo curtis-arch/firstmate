@@ -53,6 +53,7 @@ FM_BACKEND_DEFAULT_ROOT="$(cd "$FM_BACKEND_LIB_DIR/.." && pwd)"
 FM_ROOT="${FM_ROOT_OVERRIDE:-${FM_ROOT:-$FM_BACKEND_DEFAULT_ROOT}}"
 FM_HOME="${FM_HOME:-${FM_ROOT_OVERRIDE:-$FM_ROOT}}"
 FM_BACKEND_CONFIG_DIR="${FM_CONFIG_OVERRIDE:-$FM_HOME/config}"
+FM_BACKEND_STATE_DIR="${FM_STATE_OVERRIDE:-$FM_HOME/state}"
 
 # Verified backend adapters. Extend only after a backend gets its own
 # bin/backends/<name>.sh and empirical verification, mirroring AGENTS.md
@@ -373,6 +374,21 @@ fm_backend_meta_for_window() {  # <target> <state-dir>
   return 1
 }
 
+fm_backend_orca_meta_for_target() {  # <terminal-handle>
+  local target=$1 meta backend terminal match='' count=0
+  for meta in "$FM_BACKEND_STATE_DIR"/*.meta; do
+    [ -e "$meta" ] || continue
+    backend=$(fm_meta_get "$meta" backend)
+    [ "$backend" = orca ] || continue
+    terminal=$(fm_meta_get "$meta" terminal)
+    [ -n "$terminal" ] && [ "$terminal" = "$target" ] || continue
+    match=$meta
+    count=$((count + 1))
+  done
+  [ "$count" -eq 1 ] || return 1
+  printf '%s' "$match"
+}
+
 fm_backend_task_id_for_selector() {  # <raw-target> <state-dir>
   local raw=$1 state=$2 id
   case "$raw" in
@@ -519,14 +535,17 @@ fm_backend_resolve_selector() {  # <raw-target> <state-dir>
 
 # fm_backend_capture: bounded plain-text session capture.
 fm_backend_capture() {  # <backend> <target> <lines> [expected-label]
-  local backend=$1
+  local backend=$1 meta
   shift
   fm_backend_source "$backend" || return 1
   case "$backend" in
     tmux) fm_backend_tmux_capture "$@" ;;
     herdr) fm_backend_herdr_capture "$@" ;;
     zellij) fm_backend_zellij_capture "$@" ;;
-    orca) fm_backend_orca_capture "$@" ;;
+    orca)
+      meta=$(fm_backend_orca_meta_for_target "$1" 2>/dev/null || true)
+      fm_backend_orca_capture "$1" "${2:-40}" "$meta"
+      ;;
     cmux) fm_backend_cmux_capture "$@" ;;
     *) echo "error: no capture implementation for backend '$backend'" >&2; return 1 ;;
   esac
@@ -534,14 +553,17 @@ fm_backend_capture() {  # <backend> <target> <lines> [expected-label]
 
 # fm_backend_send_key: one backend-supported named special key.
 fm_backend_send_key() {  # <backend> <target> <key> [expected-label]
-  local backend=$1
+  local backend=$1 meta
   shift
   fm_backend_source "$backend" || return 1
   case "$backend" in
     tmux) fm_backend_tmux_send_key "$@" ;;
     herdr) fm_backend_herdr_send_key "$@" ;;
     zellij) fm_backend_zellij_send_key "$@" ;;
-    orca) fm_backend_orca_send_key "$@" ;;
+    orca)
+      meta=$(fm_backend_orca_meta_for_target "$1" 2>/dev/null || true)
+      fm_backend_orca_send_key "$1" "$2" "$meta"
+      ;;
     cmux) fm_backend_cmux_send_key "$@" ;;
     *) echo "error: no send-key implementation for backend '$backend'" >&2; return 1 ;;
   esac
@@ -551,14 +573,17 @@ fm_backend_send_key() {  # <backend> <target> <key> [expected-label]
 # retrying only the submission (never retyping). Echoes the verdict
 # (empty|pending|unknown|send-failed for submit-verifying adapters).
 fm_backend_send_text_submit() {  # <backend> <target> <text> <retries> <enter-sleep> <settle> [expected-label]
-  local backend=$1
+  local backend=$1 meta
   shift
   fm_backend_source "$backend" || return 1
   case "$backend" in
     tmux) fm_backend_tmux_send_text_submit "$@" ;;
     herdr) fm_backend_herdr_send_text_submit "$@" ;;
     zellij) fm_backend_zellij_send_text_submit "$@" ;;
-    orca) fm_backend_orca_send_text_submit "$@" ;;
+    orca)
+      meta=$(fm_backend_orca_meta_for_target "$1" 2>/dev/null || true)
+      fm_backend_orca_send_text_submit "$1" "$2" "$3" "$4" "$5" "$meta"
+      ;;
     cmux) fm_backend_cmux_send_text_submit "$@" ;;
     *) echo "error: no send-text implementation for backend '$backend'" >&2; return 1 ;;
   esac
@@ -568,14 +593,17 @@ fm_backend_send_text_submit() {  # <backend> <target> <text> <retries> <enter-sl
 # nonexistent/already-gone target is not an error - callers already swallow
 # failures here exactly as the inline `tmux kill-window ... || true` did).
 fm_backend_kill() {  # <backend> <target>
-  local backend=$1
+  local backend=$1 meta
   shift
   fm_backend_source "$backend" || return 1
   case "$backend" in
     tmux) fm_backend_tmux_kill "$@" ;;
     herdr) fm_backend_herdr_kill "$@" ;;
     zellij) fm_backend_zellij_kill "$@" ;;
-    orca) fm_backend_orca_kill "$@" ;;
+    orca)
+      meta=$(fm_backend_orca_meta_for_target "$1" 2>/dev/null || true)
+      fm_backend_orca_kill "$1" "$meta"
+      ;;
     cmux) fm_backend_cmux_kill "$@" ;;
     *) echo "error: no kill implementation for backend '$backend'" >&2; return 1 ;;
   esac
@@ -601,19 +629,53 @@ fm_backend_worktree_path() {  # <backend> <worktree-id>
   esac
 }
 
-# fm_backend_busy_state: semantic busy/idle/unknown for backends that expose
-# native agent-state (herdr-addendum "busy state" row - the first backend
-# where this gets real semantics beyond pane-regex). Backends with no such
-# primitive (tmux) report unknown. Callers own the fallback policy: fm-watch.sh
-# uses unknown as the cue for its pane-hash + FM_BUSY_REGEX detection, while
-# fm-crew-state.sh also corroborates native idle verdicts before treating a
-# no-run crew as not busy.
-fm_backend_busy_state() {  # <backend> <target>
+# Read-only task-worktree presence taxonomy. Only Orca currently owns task
+# worktrees and exposes a verified absence signal; every other backend remains
+# unknown so its behavior and treehouse lifecycle are unchanged.
+fm_backend_worktree_presence() {  # <backend> <worktree-id>
   local backend=$1
   shift
   fm_backend_source "$backend" || { printf 'unknown'; return 0; }
   case "$backend" in
+    orca) fm_backend_orca_worktree_presence "$@" ;;
+    *) printf 'unknown' ;;
+  esac
+}
+
+# fm_backend_busy_state: semantic busy/idle/attention/unknown for backends that expose
+# native agent-state. Orca additionally requires the recorded worktree id as
+# its third argument so its runtime-global inventory stays scoped to the task.
+# Backends with no such primitive (tmux) report unknown. Callers own the fallback policy: fm-watch.sh
+# uses unknown as the cue for its pane-hash + FM_BUSY_REGEX detection, while
+# fm-crew-state.sh also corroborates native idle verdicts before treating a
+# no-run crew as not busy.
+fm_backend_busy_state() {  # <backend> <target> [recorded-worktree-id]
+  local backend=$1 meta
+  shift
+  fm_backend_source "$backend" || { printf 'unknown'; return 0; }
+  case "$backend" in
     herdr) fm_backend_herdr_busy_state "$@" ;;
+    orca)
+      meta=$(fm_backend_orca_meta_for_target "$1" 2>/dev/null || true)
+      fm_backend_orca_busy_state "$@" "$meta"
+      ;;
+    *) printf 'unknown' ;;
+  esac
+}
+
+# fm_backend_attention_state: backend-neutral detail for a conclusive
+# `attention` busy-state verdict. Prints waiting|blocked|none|unknown. Only Orca
+# currently exposes this evidence; every other backend remains unchanged and
+# reports unknown.
+fm_backend_attention_state() {  # <backend> <target> [recorded-worktree-id]
+  local backend=$1 meta
+  shift
+  fm_backend_source "$backend" || { printf 'unknown'; return 0; }
+  case "$backend" in
+    orca)
+      meta=$(fm_backend_orca_meta_for_target "$1" 2>/dev/null || true)
+      fm_backend_orca_attention_state "$@" "$meta"
+      ;;
     *) printf 'unknown' ;;
   esac
 }
@@ -631,13 +693,16 @@ fm_backend_busy_state() {  # <backend> <target>
 # classifier, so it reports unknown here - callers fall back to their own
 # policy, exactly as an unknown fm_backend_busy_state already does.
 fm_backend_composer_state() {  # <backend> <target> -> empty|pending|unknown
-  local backend=$1
+  local backend=$1 meta
   shift
   fm_backend_source "$backend" || { printf 'unknown'; return 0; }
   case "$backend" in
     tmux) fm_tmux_composer_state "$@" ;;
     herdr) fm_backend_herdr_composer_state "$@" ;;
-    orca) fm_backend_orca_composer_state "$@" ;;
+    orca)
+      meta=$(fm_backend_orca_meta_for_target "$1" 2>/dev/null || true)
+      fm_backend_orca_composer_state "$1" "$meta"
+      ;;
     cmux) fm_backend_cmux_composer_state "$@" ;;
     *) printf 'unknown' ;;
   esac
@@ -701,26 +766,31 @@ fm_backend_target_exists() {  # <backend> <target> [expected-label]
 # "alive" because the pane itself still exists, which is exactly the gap
 # bin/fm-bootstrap.sh's session-start secondmate-liveness sweep exists to
 # close (AGENTS.md "Session start"). Prints one of:
-#   alive   - a real agent process is confirmed running.
+#   alive   - a real agent process is confirmed running, including an agent
+#             waiting or blocked on attention.
 #   dead    - CONFIDENTLY not an agent: a bare shell (tmux) or a
 #             structurally-gone/no-agent-registered pane (herdr).
 #   unknown - anything ambiguous, unreadable, or unverified for this backend.
-# Scoped to today's --secondmate-spawn-capable backends with an empirically
-# verified classifier: tmux (docs/tmux-backend.md "Agent liveness probe") and
-# herdr (docs/herdr-backend.md "Agent liveness probe reuses the husk
-# classifier"). zellij, orca, and cmux report unknown until independently
-# verified - future work, not a functional gap for the two backends
+# Scoped to backends with an empirically verified classifier: tmux
+# (docs/tmux-backend.md "Agent liveness probe"), herdr
+# (docs/herdr-backend.md "Agent liveness probe reuses the husk classifier"),
+# and Orca (docs/orca-backend.md "Semantic liveness"). zellij and cmux report
+# unknown until independently verified - not a functional gap for the two backends
 # --secondmate spawns actually support today plus tmux's reference path.
 # Callers must treat unknown exactly like an unreadable target: NEVER license
 # an action from it alone - the secondmate-liveness sweep gates a respawn on
 # `dead` only, precisely so a momentary read glitch can never duplicate a
 # live supervisor.
-fm_backend_agent_alive() {  # <backend> <target>
-  local backend=$1 target=$2
+fm_backend_agent_alive() {  # <backend> <target> [recorded-worktree-id]
+  local backend=$1 target=$2 worktree_id=${3:-} meta
   fm_backend_source "$backend" || { printf 'unknown'; return 0; }
   case "$backend" in
     tmux) fm_backend_tmux_agent_alive "$target" ;;
     herdr) fm_backend_herdr_agent_alive "$target" ;;
+    orca)
+      meta=$(fm_backend_orca_meta_for_target "$target" 2>/dev/null || true)
+      fm_backend_orca_agent_alive "$target" "$worktree_id" "$meta"
+      ;;
     *) printf 'unknown' ;;
   esac
 }

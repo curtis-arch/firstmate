@@ -24,8 +24,13 @@ make_fake_tmux() {
 #!/usr/bin/env bash
 set -u
 case "${1:-}" in
-  has-session|new-session|new-window|send-keys|kill-window)
+  has-session|new-session|new-window|send-keys)
     printf '%s\n' "$*" >> "$FM_FAKE_TMUX_LOG"
+    exit 0
+    ;;
+  kill-window)
+    printf '%s\n' "$*" >> "$FM_FAKE_TMUX_LOG"
+    : > "$FM_FAKE_TMUX_LOG.killed"
     exit 0
     ;;
   list-windows)
@@ -35,6 +40,9 @@ case "${1:-}" in
     exit 0
     ;;
   display-message)
+    if [ -e "$FM_FAKE_TMUX_LOG.killed" ]; then
+      exit 1
+    fi
     printf 'firstmate\n'
     exit 0
     ;;

@@ -1386,7 +1386,7 @@ EOF
 }
 
 test_secondmate_force_teardown_discards_child_work() {
-  local home subhome childproj childwt fakebin log
+  local home subhome childproj childwt fakebin log out
   home="$TMP_ROOT/force-teardown-home"
   subhome="$TMP_ROOT/force-teardown-subhome"
   childproj="$subhome/projects/alpha"
@@ -1421,9 +1421,10 @@ EOF
     "$ROOT/bin/fm-teardown.sh" domain >/dev/null 2>&1; then
     fail "teardown allowed a secondmate with in-flight child work"
   fi
-  PATH="$fakebin:$PATH" FM_HOME="$home" FM_FAKE_TMUX_LOG="$log" FM_FAKE_TMUX_CAPTURE="$TMP_ROOT/force-teardown-fake/pane.txt" \
-    "$ROOT/bin/fm-teardown.sh" domain --force >/dev/null 2>/dev/null \
-    || fail "force teardown failed to discard child work"
+  if ! out=$(PATH="$fakebin:$PATH" FM_HOME="$home" FM_FAKE_TMUX_LOG="$log" FM_FAKE_TMUX_CAPTURE="$TMP_ROOT/force-teardown-fake/pane.txt" \
+    "$ROOT/bin/fm-teardown.sh" domain --force 2>&1); then
+    fail "force teardown failed to discard child work: $out"
+  fi
   [ ! -d "$subhome" ] || fail "force teardown did not remove the retired secondmate home"
   [ ! -d "$childwt" ] || fail "force teardown did not remove child worktree"
   [ ! -e "$home/state/domain.meta" ] || fail "teardown did not clear parent meta"
@@ -1546,7 +1547,7 @@ EOF
     PATH="$fakebin:$PATH" FM_HOME="$home" FM_FAKE_TMUX_LOG="$log" FM_FAKE_TMUX_CAPTURE="$TMP_ROOT/symlink-inside-teardown-fake-$opdir/pane.txt" \
       "$ROOT/bin/fm-teardown.sh" domain --force >/dev/null 2>"$err" \
       || fail "force teardown refused $opdir symlinked inside the secondmate home"
-    [ ! -e "$subhome" ] || fail "force teardown did not remove subhome with inside $opdir symlink"
+    [ ! -e "$subhome" ] || fail "force teardown did not remove subhome with inside $opdir symlink: $(cat "$err" 2>/dev/null); contents: $(ls -la "$subhome" 2>&1)"
     [ ! -e "$home/state/domain.meta" ] || fail "force teardown did not clear parent meta for inside $opdir symlink"
     grep -F 'kill-window -t firstmate:fm-domain' "$log" >/dev/null || fail "force teardown did not kill parent window for inside $opdir symlink"
   done

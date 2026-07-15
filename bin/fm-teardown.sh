@@ -38,7 +38,7 @@
 # leased home releases its durable treehouse lease so the pool slot is freed,
 # never left leased forever. If the treehouse return fails, teardown leaves the
 # leased home and state in place instead of hiding a still-held lease.
-# Usage: fm-teardown.sh <task-id> [--force]
+# Usage: fm-teardown.sh <task-id> [--force] [--resume <owner-token>]
 #   --force skips ordinary-task dirty and landed-work checks, skips scout report
 #   checks, and discards secondmate child work for kind=secondmate. Only use it
 #   when the captain has explicitly said to discard the work.
@@ -88,6 +88,8 @@ SUB_HOME_MARKER=".fm-secondmate-home"
 . "$SCRIPT_DIR/fm-backend.sh"
 # shellcheck source=bin/fm-lock-lib.sh
 . "$SCRIPT_DIR/fm-lock-lib.sh"
+# shellcheck source=bin/fm-meta-lib.sh
+. "$SCRIPT_DIR/fm-meta-lib.sh"
 # shellcheck source=bin/fm-gate-refuse-lib.sh
 . "$SCRIPT_DIR/fm-gate-refuse-lib.sh"
 # Fail closed before any fleet mutation: a no-mistakes gate agent must never tear
@@ -96,10 +98,38 @@ fm_refuse_if_gate_agent
 FM_LOCK_LOG_PREFIX=teardown
 "$FM_ROOT/bin/fm-guard.sh" || true
 ID=$1
-FORCE=${2:-}
+shift
+FORCE=
+TEARDOWN_RESUME_TOKEN=
+while [ "$#" -gt 0 ]; do
+  case "$1" in
+    --force) FORCE=--force ;;
+    --resume)
+      shift
+      [ "$#" -gt 0 ] || { echo "error: --resume requires an owner token" >&2; exit 1; }
+      TEARDOWN_RESUME_TOKEN=$1
+      ;;
+    *) echo "error: unknown teardown option: $1" >&2; exit 1 ;;
+  esac
+  shift
+done
 
 META="$STATE/$ID.meta"
 [ -f "$META" ] || { echo "error: no meta for task $ID at $META" >&2; exit 1; }
+META_IDENTITY=$(fm_meta_identity "$META") || { echo "error: could not capture task identity from $META" >&2; exit 1; }
+TEARDOWN_OWNER=
+TEARDOWN_IDENTITY=
+TEARDOWN_MUTATION_STARTED=0
+PARENT_ENDPOINT_QUIESCED=0
+
+release_teardown_claim() {
+  [ "$TEARDOWN_MUTATION_STARTED" = 1 ] || [ -z "$TEARDOWN_OWNER" ] || fm_meta_release_teardown "$META" "$TEARDOWN_OWNER" 2>/dev/null || true
+}
+trap release_teardown_claim EXIT
+
+teardown_begin_mutation() {
+  TEARDOWN_MUTATION_STARTED=1
+}
 WT=$(grep '^worktree=' "$META" | cut -d= -f2-)
 T=$(grep '^window=' "$META" | cut -d= -f2-)
 PROJ=$(grep '^project=' "$META" | cut -d= -f2-)
@@ -648,6 +678,43 @@ require_orca_worktree_path_match_if_present() {
   require_orca_worktree_path_match "$worktree_id" "$inspected"
 }
 
+# Enumerate and close every task-owned teammate pane recorded in the meta
+# (orca_team_pane_keys=, written only by bin/fm-team.sh) before the Orca
+# worktree is removed. Fail closed: a pane that cannot be proven gone -
+# resolution ambiguity, or still present after close - refuses teardown unless
+# --force, the captain's explicit discard path, which downgrades the refusal
+# to a warning. Landing/dirty-work safety is untouched: this runs strictly
+# after those checks, immediately before endpoint/worktree cleanup.
+close_orca_team_panes() {  # <meta-path> <worktree-id> <force-flag>
+  local meta=$1 worktree_id=$2 force=$3 keys key resolved rc handle status=0
+  fm_backend_source orca || return 1
+  keys=$(fm_backend_orca_team_pane_keys "$meta")
+  [ -n "$keys" ] || return 0
+  for key in $keys; do
+    if resolved=$(fm_backend_orca_team_resolve_pane "$worktree_id" "$key" 2>/dev/null); then
+      handle=${resolved%%$'\t'*}
+      fm_backend_orca_raw_close "$handle" >/dev/null 2>&1 || true
+      if resolved=$(fm_backend_orca_team_resolve_pane "$worktree_id" "$key" 2>/dev/null); then
+        rc=0
+      else
+        rc=$?
+      fi
+    else
+      rc=$?
+    fi
+    if [ "$rc" -ne 2 ]; then
+      if [ "$force" = "--force" ]; then
+        echo "warning: teammate pane $key could not be proven closed; continuing under --force" >&2
+      else
+        echo "REFUSED: teammate pane $key could not be proven closed before Orca worktree removal." >&2
+        echo "Inspect it with bin/fm-team.sh status, close it explicitly with bin/fm-team.sh close, or use --force after explicit discard approval." >&2
+        status=1
+      fi
+    fi
+  done
+  return "$status"
+}
+
 firstmate_home_has_treehouse_slot() {
   local home=$1
   worktree_registered_for_project "$FM_ROOT" "$home"
@@ -858,71 +925,106 @@ validate_firstmate_home_children_removal() {
   done
 }
 
+cleanup_claimed_firstmate_child() {
+  local home=$1 child_meta=$2 child_identity=$3 sub_state child_id child_t child_wt child_proj child_kind child_home child_backend child_orca_worktree_id child_return_rc
+  sub_state="$home/state"
+  child_id=$(basename "$child_meta" .meta)
+  child_wt=$(meta_value "$child_meta" worktree)
+  child_proj=$(meta_value "$child_meta" project)
+  child_kind=$(meta_value "$child_meta" kind)
+  [ -n "$child_kind" ] || child_kind=ship
+  child_backend=$(fm_backend_of_meta "$child_meta")
+  if [ "$child_backend" = orca ]; then
+    child_t=$(meta_value "$child_meta" terminal)
+  else
+    child_t=$(fm_backend_target_of_meta "$child_meta")
+  fi
+  if [ "$child_backend" = orca ] && [ "$child_kind" != secondmate ]; then
+    child_orca_worktree_id=$(require_orca_worktree_id "$child_meta") || return 1
+    if [ -n "$child_wt" ] && [ -e "$child_wt" ]; then
+      validate_child_worktree_for_removal "$child_wt" "$child_proj" >/dev/null || return 1
+    fi
+  fi
+  if [ -n "$child_t" ]; then
+    if [ "$child_backend" = zellij ]; then
+      ( unset FM_ROOT_OVERRIDE; FM_HOME=$home FM_ROOT=$home fm_backend_kill "$child_backend" "$child_t" "$(meta_value "$child_meta" zellij_tab_id)" "fm-$child_id" ) 2>/dev/null || true
+    else
+      fm_backend_kill "$child_backend" "$child_t" "$(meta_value "$child_meta" zellij_tab_id)" "fm-$child_id" 2>/dev/null || true
+    fi
+  fi
+  if [ "$child_kind" = secondmate ]; then
+    child_home=$(meta_value "$child_meta" home)
+    [ -n "$child_home" ] || child_home=$child_wt
+    if [ -n "$child_home" ] && [ -d "$child_home" ]; then
+      if [ -n "$child_t" ] && fm_backend_target_exists "$child_backend" "$child_t" "fm-$child_id" 2>/dev/null; then
+        return 1
+      fi
+      validate_firstmate_home_children_removal "$child_home" || return 1
+      cleanup_firstmate_home_children "$child_home" || return 1
+      remove_firstmate_home "$child_home" "child firstmate home" "$child_id" || return 1
+    fi
+  elif [ "$child_backend" = orca ]; then
+    if [ -n "$child_wt" ] && [ -d "$child_wt" ]; then
+      validate_child_worktree_for_removal "$child_wt" "$child_proj" >/dev/null || return 1
+      rm -f "$child_wt/.claude/settings.local.json" "$child_wt/.opencode/plugins/fm-turn-end.js" "$child_wt/.fm-grok-turnend"
+    fi
+    # Child cleanup only runs on a --force secondmate teardown (explicit
+    # discard), so recorded teammate panes get the best-effort close path.
+    close_orca_team_panes "$child_meta" "$child_orca_worktree_id" "--force" || true
+    fm_backend_remove_worktree "$child_backend" "$child_orca_worktree_id" || return 1
+  elif [ -n "$child_wt" ] && [ -d "$child_wt" ]; then
+    validate_child_worktree_for_removal "$child_wt" "$child_proj" >/dev/null || return 1
+    rm -f "$child_wt/.claude/settings.local.json" "$child_wt/.opencode/plugins/fm-turn-end.js" "$child_wt/.fm-grok-turnend"
+    if [ -n "$child_proj" ] && [ -d "$child_proj" ] && command -v treehouse >/dev/null 2>&1; then
+      if teardown_treehouse_return "$child_wt" "$child_proj" "child worktree"; then
+        :
+      else
+        child_return_rc=$?
+        if [ "$child_return_rc" -eq "$TEARDOWN_TREEHOUSE_LOCK_REFUSED" ]; then
+          return "$child_return_rc"
+        fi
+        safe_rm_rf_child_worktree "$child_wt" "$child_proj"
+      fi
+    else
+      safe_rm_rf_child_worktree "$child_wt" "$child_proj"
+    fi
+  fi
+  remove_grok_turnend_auth "$sub_state" "$child_id"
+  fm_meta_remove_if_identity "$child_meta" "$child_identity" \
+    "$sub_state/$child_id.status" "$sub_state/$child_id.turn-ended" "$sub_state/$child_id.check.sh" \
+    "$sub_state/$child_id.pi-ext.ts" "$sub_state/$child_id.grok-turnend-token"
+}
+
 cleanup_firstmate_home_children() {
-  local home=$1 sub_state child_meta child_id child_t child_wt child_proj child_kind child_home child_backend child_orca_worktree_id child_return_rc
+  local home=$1 sub_state child_meta child_identity child_claim status=0 i
+  # Bash 3.2 with set -u treats a declared-but-empty array expansion as
+  # unbound, so keep an unused sentinel at index 0 and iterate from index 1.
+  local -a child_metas=('') child_claims=('') child_mutated=('')
   sub_state="$home/state"
   [ -d "$sub_state" ] || return 0
   for child_meta in "$sub_state"/*.meta; do
     [ -e "$child_meta" ] || continue
-    child_id=$(basename "$child_meta" .meta)
-    child_wt=$(meta_value "$child_meta" worktree)
-    child_proj=$(meta_value "$child_meta" project)
-    child_kind=$(meta_value "$child_meta" kind)
-    [ -n "$child_kind" ] || child_kind=ship
-    child_backend=$(fm_backend_of_meta "$child_meta")
-    if [ "$child_backend" = orca ]; then
-      child_t=$(meta_value "$child_meta" terminal)
-    else
-      child_t=$(fm_backend_target_of_meta "$child_meta")
-    fi
-    if [ "$child_backend" = orca ] && [ "$child_kind" != secondmate ]; then
-      child_orca_worktree_id=$(require_orca_worktree_id "$child_meta") || return 1
-      if [ -n "$child_wt" ] && [ -e "$child_wt" ]; then
-        validate_child_worktree_for_removal "$child_wt" "$child_proj" >/dev/null || return 1
-      fi
-    fi
-    if [ -n "$child_t" ]; then
-      if [ "$child_backend" = zellij ]; then
-        # Zellij titles are scoped by the owning home tag, so forced secondmate
-        # cleanup must verify child tabs as that child home, not the parent.
-        ( unset FM_ROOT_OVERRIDE; FM_HOME=$home FM_ROOT=$home fm_backend_kill "$child_backend" "$child_t" "$(meta_value "$child_meta" zellij_tab_id)" "fm-$child_id" ) 2>/dev/null || true
-      else
-        fm_backend_kill "$child_backend" "$child_t" "$(meta_value "$child_meta" zellij_tab_id)" "fm-$child_id" 2>/dev/null || true
-      fi
-    fi
-    if [ "$child_kind" = secondmate ]; then
-      child_home=$(meta_value "$child_meta" home)
-      [ -n "$child_home" ] || child_home=$child_wt
-      if [ -n "$child_home" ] && [ -d "$child_home" ]; then
-        cleanup_firstmate_home_children "$child_home"
-        remove_firstmate_home "$child_home" "child firstmate home" "$child_id"
-      fi
-    elif [ "$child_backend" = orca ]; then
-      if [ -n "$child_wt" ] && [ -d "$child_wt" ]; then
-        validate_child_worktree_for_removal "$child_wt" "$child_proj" >/dev/null || return 1
-        rm -f "$child_wt/.claude/settings.local.json" "$child_wt/.opencode/plugins/fm-turn-end.js" "$child_wt/.fm-grok-turnend"
-      fi
-      fm_backend_remove_worktree "$child_backend" "$child_orca_worktree_id" || return 1
-    elif [ -n "$child_wt" ] && [ -d "$child_wt" ]; then
-      validate_child_worktree_for_removal "$child_wt" "$child_proj" >/dev/null || return 1
-      rm -f "$child_wt/.claude/settings.local.json" "$child_wt/.opencode/plugins/fm-turn-end.js" "$child_wt/.fm-grok-turnend"
-      if [ -n "$child_proj" ] && [ -d "$child_proj" ] && command -v treehouse >/dev/null 2>&1; then
-        if teardown_treehouse_return "$child_wt" "$child_proj" "child worktree"; then
-          :
-        else
-          child_return_rc=$?
-          if [ "$child_return_rc" -eq "$TEARDOWN_TREEHOUSE_LOCK_REFUSED" ]; then
-            return "$child_return_rc"
-          fi
-          safe_rm_rf_child_worktree "$child_wt" "$child_proj"
-        fi
-      else
-        safe_rm_rf_child_worktree "$child_wt" "$child_proj"
-      fi
-    fi
-    remove_grok_turnend_auth "$sub_state" "$child_id"
-    rm -f "$sub_state/$child_id.status" "$sub_state/$child_id.turn-ended" "$sub_state/$child_id.check.sh" "$sub_state/$child_id.meta" "$sub_state/$child_id.pi-ext.ts" "$sub_state/$child_id.grok-turnend-token"
+    child_identity=$(fm_meta_identity "$child_meta") || { status=1; break; }
+    child_claim=$(fm_meta_claim_teardown "$child_meta" "$child_identity" "$TEARDOWN_OWNER" "$TEARDOWN_RESUME_TOKEN") || { status=1; break; }
+    child_metas+=("$child_meta")
+    child_claims+=("$child_claim")
+    child_mutated+=(0)
   done
+  if [ "$status" -eq 0 ]; then
+    for ((i=1; i<${#child_metas[@]}; i++)); do
+      child_mutated[i]=1
+      if cleanup_claimed_firstmate_child "$home" "${child_metas[$i]}" "${child_claims[$i]}"; then
+        :
+      else
+        status=$?
+        break
+      fi
+    done
+  fi
+  for ((i=1; i<${#child_metas[@]}; i++)); do
+    [ "${child_mutated[$i]}" = 1 ] || fm_meta_release_teardown "${child_metas[$i]}" "$TEARDOWN_OWNER" 2>/dev/null || true
+  done
+  return "$status"
 }
 
 remove_secondmate_registry_entry() {
@@ -936,9 +1038,6 @@ remove_secondmate_registry_entry() {
 if [ "$KIND" = secondmate ]; then
   [ -n "$HOME_PATH" ] || HOME_PATH=$WT
   validate_firstmate_home_for_removal "$HOME_PATH" "secondmate home" "$ID" >/dev/null || exit 1
-  if [ "$FORCE" = "--force" ]; then
-    validate_firstmate_home_children_removal "$HOME_PATH" || exit 1
-  fi
 fi
 
 if [ "$KIND" = secondmate ] && [ "$FORCE" != "--force" ]; then
@@ -951,10 +1050,6 @@ if [ "$KIND" = secondmate ] && [ "$FORCE" != "--force" ]; then
       exit 1
     done
   fi
-fi
-
-if [ "$KIND" = secondmate ] && [ "$FORCE" = "--force" ]; then
-  cleanup_firstmate_home_children "$HOME_PATH"
 fi
 
 if [ "$KIND" = scout ] && [ "$FORCE" != "--force" ]; then
@@ -976,6 +1071,36 @@ if [ "$BACKEND" = orca ] && [ "$KIND" != scout ] && [ "$KIND" != secondmate ] &&
   ORCA_PATH_MATCH_VERIFIED=1
 fi
 
+EXISTING_LIFECYCLE=$(fm_meta_get "$META" lifecycle)
+if [ -n "$EXISTING_LIFECYCLE" ] && [ -z "$TEARDOWN_RESUME_TOKEN" ]; then
+  case "$EXISTING_LIFECYCLE" in
+    teardown:*)
+      EXISTING_OWNER=${EXISTING_LIFECYCLE#teardown:}
+      EXISTING_TOKEN=${EXISTING_OWNER%%:*}
+      echo "error: teardown ownership is already recorded for $ID; resume explicitly with --resume $EXISTING_TOKEN" >&2
+      ;;
+    *) echo "error: task $ID has unsupported lifecycle state $EXISTING_LIFECYCLE" >&2 ;;
+  esac
+  exit 1
+fi
+TEARDOWN_OWNER=$(fm_meta_teardown_owner "$TEARDOWN_RESUME_TOKEN") || { echo "error: could not create teardown owner for $ID" >&2; exit 1; }
+TEARDOWN_IDENTITY=$(fm_meta_claim_teardown "$META" "$META_IDENTITY" "$TEARDOWN_OWNER" "$TEARDOWN_RESUME_TOKEN") || {
+  TEARDOWN_OWNER=
+  echo "error: task metadata changed or teardown ownership is still live; refusing to modify task $ID" >&2
+  exit 1
+}
+
+if [ "$KIND" = secondmate ] && [ "$FORCE" = "--force" ]; then
+  validate_firstmate_home_children_removal "$HOME_PATH" || exit 1
+  teardown_begin_mutation
+  [ -z "$T" ] || fm_backend_kill "$BACKEND" "$T" "$(meta_value "$META" zellij_tab_id)" "fm-$ID" 2>/dev/null || true
+  if [ -n "$T" ] && fm_backend_target_exists "$BACKEND" "$T" "fm-$ID" 2>/dev/null; then
+    echo "error: secondmate endpoint $T remained live; refusing child cleanup" >&2
+    exit 1
+  fi
+  PARENT_ENDPOINT_QUIESCED=1
+fi
+
 if [ -d "$WT" ] && [ "$FORCE" != "--force" ]; then
   if validate_worktree_teardown_safety; then
     :
@@ -988,6 +1113,12 @@ if [ -d "$WT" ] && [ "$FORCE" != "--force" ]; then
       exit 1
     fi
   fi
+fi
+
+[ "$TEARDOWN_MUTATION_STARTED" = 1 ] || teardown_begin_mutation
+
+if [ "$KIND" = secondmate ] && [ "$FORCE" = "--force" ]; then
+  cleanup_firstmate_home_children "$HOME_PATH"
 fi
 
 # Best-effort: drop the local task branch so the shared repo does not accumulate refs.
@@ -1005,6 +1136,7 @@ if [ "$BACKEND" = orca ] && [ "$KIND" != secondmate ]; then
     fi
     rm -f "$WT/.claude/settings.local.json" "$WT/.opencode/plugins/fm-turn-end.js" "$WT/.fm-grok-turnend"
   fi
+  close_orca_team_panes "$META" "$ORCA_WORKTREE_ID" "$FORCE" || exit 1
   [ -z "$T_ORCA" ] || fm_backend_kill "$BACKEND" "$T" "$(meta_value "$META" zellij_tab_id)" "fm-$ID" 2>/dev/null || true
   fm_backend_remove_worktree "$BACKEND" "$ORCA_WORKTREE_ID"
 elif [ -d "$WT" ] && [ "$KIND" != secondmate ]; then
@@ -1030,7 +1162,7 @@ elif [ -d "$WT" ] && [ "$KIND" != secondmate ]; then
   }
 fi
 
-if [ "$BACKEND" != orca ]; then
+if [ "$BACKEND" != orca ] && [ "$PARENT_ENDPOINT_QUIESCED" != 1 ]; then
   fm_backend_kill "$BACKEND" "$T" "$(meta_value "$META" zellij_tab_id)" "fm-$ID" 2>/dev/null || true
 fi
 if [ "$KIND" = secondmate ]; then
@@ -1043,7 +1175,13 @@ fm_backend_clear_transition "$BACKEND" "$STATE" "$T" || true
 # Remove the per-task temp root (/tmp/fm-<id>/, incl. its gotmp/) recorded by spawn.
 # Read before the state-file rm below; empty (pre-fix tasks without tasktmp=) is a no-op.
 [ -n "$TASK_TMP" ] && rm -rf "$TASK_TMP"
-rm -f "$STATE/$ID.status" "$STATE/$ID.turn-ended" "$STATE/$ID.check.sh" "$STATE/$ID.meta" "$STATE/$ID.pi-ext.ts" "$STATE/$ID.grok-turnend-token"
+fm_meta_remove_if_identity "$STATE/$ID.meta" "$TEARDOWN_IDENTITY" \
+  "$STATE/$ID.status" "$STATE/$ID.turn-ended" "$STATE/$ID.check.sh" \
+  "$STATE/$ID.pi-ext.ts" "$STATE/$ID.grok-turnend-token" || {
+  echo "error: task metadata identity changed during teardown; refusing to delete $STATE/$ID.meta" >&2
+  exit 1
+}
+TEARDOWN_OWNER=
 if [ "$KIND" != scout ] && [ "$KIND" != secondmate ] && [ "$MODE" != local-only ]; then
   "$FM_ROOT/bin/fm-fleet-sync.sh" "$PROJ" || true
 fi
