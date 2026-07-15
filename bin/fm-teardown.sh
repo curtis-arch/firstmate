@@ -673,6 +673,43 @@ require_orca_worktree_path_match_if_present() {
   require_orca_worktree_path_match "$worktree_id" "$inspected"
 }
 
+# Enumerate and close every task-owned teammate pane recorded in the meta
+# (orca_team_pane_keys=, written only by bin/fm-team.sh) before the Orca
+# worktree is removed. Fail closed: a pane that cannot be proven gone -
+# resolution ambiguity, or still present after close - refuses teardown unless
+# --force, the captain's explicit discard path, which downgrades the refusal
+# to a warning. Landing/dirty-work safety is untouched: this runs strictly
+# after those checks, immediately before endpoint/worktree cleanup.
+close_orca_team_panes() {  # <meta-path> <worktree-id> <force-flag>
+  local meta=$1 worktree_id=$2 force=$3 keys key resolved rc handle status=0
+  fm_backend_source orca || return 1
+  keys=$(fm_backend_orca_team_pane_keys "$meta")
+  [ -n "$keys" ] || return 0
+  for key in $keys; do
+    if resolved=$(fm_backend_orca_team_resolve_pane "$worktree_id" "$key" 2>/dev/null); then
+      handle=${resolved%%$'\t'*}
+      fm_backend_orca_raw_close "$handle" >/dev/null 2>&1 || true
+      if resolved=$(fm_backend_orca_team_resolve_pane "$worktree_id" "$key" 2>/dev/null); then
+        rc=0
+      else
+        rc=$?
+      fi
+    else
+      rc=$?
+    fi
+    if [ "$rc" -ne 2 ]; then
+      if [ "$force" = "--force" ]; then
+        echo "warning: teammate pane $key could not be proven closed; continuing under --force" >&2
+      else
+        echo "REFUSED: teammate pane $key could not be proven closed before Orca worktree removal." >&2
+        echo "Inspect it with bin/fm-team.sh status, close it explicitly with bin/fm-team.sh close, or use --force after explicit discard approval." >&2
+        status=1
+      fi
+    fi
+  done
+  return "$status"
+}
+
 firstmate_home_has_treehouse_slot() {
   local home=$1
   worktree_registered_for_project "$FM_ROOT" "$home"
@@ -926,6 +963,9 @@ cleanup_claimed_firstmate_child() {
       validate_child_worktree_for_removal "$child_wt" "$child_proj" >/dev/null || return 1
       rm -f "$child_wt/.claude/settings.local.json" "$child_wt/.opencode/plugins/fm-turn-end.js" "$child_wt/.fm-grok-turnend"
     fi
+    # Child cleanup only runs on a --force secondmate teardown (explicit
+    # discard), so recorded teammate panes get the best-effort close path.
+    close_orca_team_panes "$child_meta" "$child_orca_worktree_id" "--force" || true
     fm_backend_remove_worktree "$child_backend" "$child_orca_worktree_id" || return 1
   elif [ -n "$child_wt" ] && [ -d "$child_wt" ]; then
     validate_child_worktree_for_removal "$child_wt" "$child_proj" >/dev/null || return 1
@@ -1084,6 +1124,7 @@ if [ "$BACKEND" = orca ] && [ "$KIND" != secondmate ]; then
     fi
     rm -f "$WT/.claude/settings.local.json" "$WT/.opencode/plugins/fm-turn-end.js" "$WT/.fm-grok-turnend"
   fi
+  close_orca_team_panes "$META" "$ORCA_WORKTREE_ID" "$FORCE" || exit 1
   [ -z "$T_ORCA" ] || fm_backend_kill "$BACKEND" "$T" "$(meta_value "$META" zellij_tab_id)" "fm-$ID" 2>/dev/null || true
   fm_backend_remove_worktree "$BACKEND" "$ORCA_WORKTREE_ID"
 elif [ -d "$WT" ] && [ "$KIND" != secondmate ]; then
