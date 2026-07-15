@@ -398,6 +398,10 @@ classify_heartbeat() {
   printf 'self|heartbeat (catch-all scan runs in housekeeping)'
 }
 
+classify_possible_external_destruction() {  # <full reason>
+  printf 'escalate|%s' "$1"
+}
+
 # Anything unrecognized is escalated (fail-safe).
 classify_unknown() {  # <reason>
   printf 'escalate|unknown wake: %s' "$1"
@@ -1164,7 +1168,7 @@ should_force_self() {  # <reason>
 is_wake_reason() {  # <reason>
   local reason=$1
   case "$reason" in
-    signal:*|stale:*|attention:*|check:*|heartbeat|heartbeat:*) return 0 ;;
+    signal:*|stale:*|attention:*|check:*|heartbeat|heartbeat:*|possible-external-destruction:*) return 0 ;;
   esac
   return 1
 }
@@ -1187,6 +1191,7 @@ handle_wake() {  # <reason> <state>
                  decision=$(classify_attention "$reason") ;;
     check:*)  decision=$(classify_check "$reason") ;;
     heartbeat|heartbeat:*) decision=$(classify_heartbeat) ;;
+    possible-external-destruction:*) decision=$(classify_possible_external_destruction "$reason") ;;
     *)        decision=$(classify_unknown "$reason") ;;
   esac
   action=${decision%%|*}

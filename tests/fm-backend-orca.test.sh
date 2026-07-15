@@ -149,6 +149,50 @@ test_runtime_check_refuses_unready_orca_status() {
   pass "fm_backend_orca_runtime_check: fails closed when runtime is not ready"
 }
 
+test_worktree_presence_taxonomy_is_strict_and_endpoint_independent() {
+  local out
+  orca_case presence-absent
+  printf '{"ok":false,"error":{"code":"worktree_not_found","message":"gone"}}\n' > "$RESP/1.out"
+  out=$( PATH="$FB:$PATH" FM_ORCA_LOG="$LOG" FM_ORCA_RESPONSES="$RESP" \
+    bash -c '. "$0/bin/backends/orca.sh"; fm_backend_orca_worktree_presence wt-gone' "$ROOT" )
+  [ "$out" = possible-external-destruction ] || fail "exact worktree_not_found under a ready runtime should be possible-external-destruction, got '$out'"
+
+  orca_case presence-live-no-endpoint
+  printf '{"ok":true,"result":{"worktree":{"id":"wt-live","path":"/tmp/wt-live"}}}\n' > "$RESP/1.out"
+  out=$( PATH="$FB:$PATH" FM_ORCA_LOG="$LOG" FM_ORCA_RESPONSES="$RESP" \
+    bash -c '. "$0/bin/backends/orca.sh"; fm_backend_orca_worktree_presence wt-live' "$ROOT" )
+  [ "$out" = present ] || fail "a matching worktree should be present even with no terminal endpoint, got '$out'"
+  assert_not_contains "$(cat "$LOG")" $'orca\x1f''terminal' \
+    "worktree presence must not use endpoint existence as destruction evidence"
+
+  orca_case presence-runtime-down
+  printf '{"ok":true,"result":{"runtime":{"reachable":false,"state":"unavailable"}}}\n' > "$RESP/1.out"
+  out=$( PATH="$FB:$PATH" FM_ORCA_LOG="$LOG" FM_ORCA_RESPONSES="$RESP" FM_ORCA_STATUS_RESPONSE=sequence \
+    bash -c '. "$0/bin/backends/orca.sh"; fm_backend_orca_worktree_presence wt-gone' "$ROOT" )
+  [ "$out" = unknown ] || fail "runtime unavailability must remain unknown, got '$out'"
+  assert_not_contains "$(cat "$LOG")" $'orca\x1f''worktree' \
+    "an unavailable runtime should not license a worktree absence query"
+
+  orca_case presence-malformed-runtime
+  printf 'not-json\n' > "$RESP/1.out"
+  out=$( PATH="$FB:$PATH" FM_ORCA_LOG="$LOG" FM_ORCA_RESPONSES="$RESP" FM_ORCA_STATUS_RESPONSE=sequence \
+    bash -c '. "$0/bin/backends/orca.sh"; fm_backend_orca_worktree_presence wt-gone' "$ROOT" )
+  [ "$out" = unknown ] || fail "malformed runtime JSON must remain unknown, got '$out'"
+
+  orca_case presence-other-errors
+  printf '{"ok":false,"error":{"code":"terminal_handle_stale","message":"stale terminal"}}\n' > "$RESP/1.out"
+  out=$( PATH="$FB:$PATH" FM_ORCA_LOG="$LOG" FM_ORCA_RESPONSES="$RESP" \
+    bash -c '. "$0/bin/backends/orca.sh"; fm_backend_orca_worktree_presence wt-maybe' "$ROOT" )
+  [ "$out" = unknown ] || fail "a stale-terminal error must remain unknown, got '$out'"
+
+  orca_case presence-malformed-show
+  printf 'not-json\n' > "$RESP/1.out"
+  out=$( PATH="$FB:$PATH" FM_ORCA_LOG="$LOG" FM_ORCA_RESPONSES="$RESP" \
+    bash -c '. "$0/bin/backends/orca.sh"; fm_backend_orca_worktree_presence wt-maybe' "$ROOT" )
+  [ "$out" = unknown ] || fail "malformed worktree JSON must remain unknown, got '$out'"
+  pass "Orca worktree presence: exact three-way taxonomy, runtime-gated and endpoint-independent"
+}
+
 test_send_text_submit_verifies_empty_composer_after_enter() {
   local out
   orca_case send-submit
@@ -804,6 +848,28 @@ test_peek_and_crew_state_fail_closed_on_orca_error_json() {
   assert_contains "$(cat "$LOG")" $'orca\x1f''terminal'$'\x1f''read'$'\x1f''--terminal'$'\x1f''term-stale' \
     "fm-peek/fm-crew-state did not read the recorded Orca terminal"
   pass "fm-peek/fm-crew-state: Orca read error JSON fails closed"
+}
+
+test_crew_state_surfaces_possible_external_destruction() {
+  local state id out
+  id="orcadestroyedz8"
+  state="$TMP_ROOT/destroyed-state"; mkdir -p "$state"
+  fm_write_meta "$state/$id.meta" \
+    "window=fm-$id" "terminal=term-gone" "worktree=$TMP_ROOT/absent-worktree" \
+    "project=$TMP_ROOT/project" "harness=claude" "kind=ship" "backend=orca" \
+    "orca_worktree_id=wt-destroyed"
+  orca_case crew-state-destroyed
+  printf '{"ok":false,"error":{"code":"worktree_not_found","message":"gone"}}\n' > "$RESP/1.out"
+  out=$( PATH="$FB:$PATH" FM_ORCA_LOG="$LOG" FM_ORCA_RESPONSES="$RESP" \
+    FM_ROOT_OVERRIDE="$ROOT" FM_STATE_OVERRIDE="$state" "$ROOT/bin/fm-crew-state.sh" "$id" )
+  assert_contains "$out" "state: possible-external-destruction" \
+    "crew-state should expose the distinct external-destruction state"
+  assert_contains "$out" "task $id" "crew-state destruction guidance should name the Firstmate task"
+  assert_contains "$out" "do not delete, recreate, reset, or discard automatically" \
+    "crew-state should carry fail-safe recovery guidance"
+  assert_not_contains "$(cat "$LOG")" $'orca\x1f''terminal' \
+    "crew-state should not require an endpoint-gone result to prove worktree absence"
+  pass "fm-crew-state: confidently absent Orca worktree is a distinct recoverable state"
 }
 
 test_target_exists_rejects_orca_error_json() {
@@ -2007,6 +2073,7 @@ test_capture_falls_back_to_text_fields
 test_capture_fails_on_orca_error_json
 test_runtime_check_accepts_ready_orca_status
 test_runtime_check_refuses_unready_orca_status
+test_worktree_presence_taxonomy_is_strict_and_endpoint_independent
 test_send_text_submit_verifies_empty_composer_after_enter
 test_send_text_submit_keeps_current_tail_when_limited
 test_send_text_submit_retries_when_composer_stays_pending
@@ -2063,6 +2130,7 @@ test_spawn_preserves_orca_metadata_when_abort_cleanup_fails
 test_spawn_refuses_unwritable_metadata_before_orca_mutation
 test_peek_send_and_crew_state_route_through_orca_meta
 test_peek_and_crew_state_fail_closed_on_orca_error_json
+test_crew_state_surfaces_possible_external_destruction
 test_target_exists_rejects_orca_error_json
 test_scout_teardown_removes_orca_worktree_via_helper
 test_scout_teardown_refuses_orca_id_path_mismatch

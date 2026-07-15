@@ -102,6 +102,22 @@ Stale-handle recovery:
 - Recovery never searches another worktree, guesses from titles or ordering, selects the first candidate, or creates a replacement terminal.
 - Existing task metas without `orca_pane_key` retain their prior behavior: live handles continue to work, while a stale handle surfaces the original Orca error without attempting recovery.
 
+External worktree destruction detection:
+
+- `fm_backend_orca_worktree_presence` owns the exact taxonomy: `present`, `possible-external-destruction`, or `unknown`.
+- `possible-external-destruction` requires `orca status --json` to report a reachable, ready runtime and `orca worktree show --worktree id:<recorded-id> --json` to return the exact `worktree_not_found` error code.
+- Runtime errors, malformed JSON, transient unavailability, missing metadata, mismatched success payloads, stale terminal handles, and every other error remain `unknown`.
+- The probe never consults `terminal list`, so cross-host terminal-list limitations cannot become destruction evidence.
+- `fm-watch.sh` probes every live Orca task record independently of terminal capture and emits a distinct `possible-external-destruction` wake naming the Firstmate task.
+- The wake includes the recorded project and worktree path plus branch/ref inspection guidance, and explicitly forbids automatic delete, recreate, reset, or discard actions.
+- `fm-crew-state.sh` reports `state: possible-external-destruction · source: backend` for the same confident verdict instead of collapsing it into stale, dead-agent, or runtime-unavailable state.
+- `fm-supervise-daemon.sh` recognizes the wake as an explicit escalation, preserving its task identity and recovery guidance in the away-mode digest.
+- A per-task marker suppresses repeated wakes for the same absent worktree id, an affirmative `present` result clears the marker, and an `unknown` result leaves it untouched.
+
+Orca 1.4.141 daemon replacement can remove a task PTY without a final status write.
+An endpoint-gone result therefore remains insufficient proof of worktree destruction; only the runtime-gated worktree probe above can produce the distinct verdict.
+No detection path deletes, recreates, resets, discards, or otherwise repairs task state.
+
 Teardown:
 
 - Teardown claims the recorded task generation before any destructive cleanup; recovery and metadata promotion refuse while that ownership is active.

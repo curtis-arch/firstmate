@@ -370,6 +370,37 @@ test_actionable_signal_surfaced() {
   pass "captain-relevant signal is surfaced (queue + exit) and marked surfaced"
 }
 
+test_orca_worktree_destruction_surfaces_without_endpoint() {
+  local dir state fakebin out drain_out id pid
+  dir=$(make_case orca-worktree-destruction); state="$dir/state"; fakebin="$dir/fakebin"
+  out="$dir/watch.out"; drain_out="$dir/drain.out"; id="orca-destroyed-w1"
+  fm_write_meta "$state/$id.meta" \
+    "window=fm-$id" "terminal=term-vanished" "backend=orca" \
+    "orca_worktree_id=wt-vanished" "worktree=$dir/missing-wt" "project=$dir/project" "kind=ship"
+  cat > "$fakebin/orca" <<'SH'
+#!/usr/bin/env bash
+case "${1:-} ${2:-}" in
+  "status --json") printf '{"ok":true,"result":{"runtime":{"reachable":true,"state":"ready"}}}\n' ;;
+  "worktree show") printf '{"ok":false,"error":{"code":"worktree_not_found","message":"gone"}}\n' ;;
+  *) exit 1 ;;
+esac
+SH
+  chmod +x "$fakebin/orca"
+  watch_bg "$state" "$fakebin" "$out"
+  pid=$!
+  wait_for_exit "$pid" 40 || fail "watcher did not surface a confidently absent Orca worktree"
+  grep -F "possible-external-destruction: task=$id" "$out" >/dev/null \
+    || fail "watcher did not name the destroyed task: $(cat "$out")"
+  grep -F "do not delete, recreate, reset, or discard automatically" "$out" >/dev/null \
+    || fail "watcher wake omitted recovery safety guidance"
+  FM_STATE_OVERRIDE="$state" "$DRAIN" > "$drain_out" 2>/dev/null || fail "drain after Orca destruction wake failed"
+  grep "$(printf '\tpossible-external-destruction\t')" "$drain_out" | grep -F "$id" >/dev/null \
+    || fail "Orca destruction was not queued under its distinct wake kind"
+  [ "$(cat "$state/.possible-external-destruction-$id" 2>/dev/null)" = wt-vanished ] \
+    || fail "watcher did not record the destruction suppressor"
+  pass "watcher: missing Orca PTY is bypassed; exact worktree absence surfaces a distinct task wake"
+}
+
 test_terminal_stale_surfaced() {
   local dir state fakebin out drain_out capture_file window key pane_hash sig pid
   dir=$(make_case terminal-stale); state="$dir/state"; fakebin="$dir/fakebin"
@@ -1162,6 +1193,7 @@ test_turn_ended_provably_working_absorbed
 test_turn_ended_not_working_surfaced
 test_working_note_not_working_surfaced
 test_actionable_signal_surfaced
+test_orca_worktree_destruction_surfaces_without_endpoint
 test_terminal_stale_surfaced
 test_stale_terminal_status_overridden_by_active_run
 test_nonterminal_stale_provably_working_absorbed_then_escalated

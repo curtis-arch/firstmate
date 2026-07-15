@@ -629,6 +629,19 @@ fm_backend_worktree_path() {  # <backend> <worktree-id>
   esac
 }
 
+# Read-only task-worktree presence taxonomy. Only Orca currently owns task
+# worktrees and exposes a verified absence signal; every other backend remains
+# unknown so its behavior and treehouse lifecycle are unchanged.
+fm_backend_worktree_presence() {  # <backend> <worktree-id>
+  local backend=$1
+  shift
+  fm_backend_source "$backend" || { printf 'unknown'; return 0; }
+  case "$backend" in
+    orca) fm_backend_orca_worktree_presence "$@" ;;
+    *) printf 'unknown' ;;
+  esac
+}
+
 # fm_backend_busy_state: semantic busy/idle/attention/unknown for backends that expose
 # native agent-state. Orca additionally requires the recorded worktree id as
 # its third argument so its runtime-global inventory stays scoped to the task.
