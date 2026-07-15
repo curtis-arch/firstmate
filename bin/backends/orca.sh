@@ -244,7 +244,8 @@ try {
 } catch (_) {
   process.exit(1);
 }
-if (data.ok !== true || !data.result || !Array.isArray(data.result.terminals)) process.exit(1);
+if (data.ok !== true || !data.result || !Array.isArray(data.result.terminals) || data.result.truncated !== false) process.exit(1);
+if (data.result.totalCount !== undefined && (!Number.isSafeInteger(data.result.totalCount) || data.result.totalCount < 0 || data.result.totalCount !== data.result.terminals.length)) process.exit(1);
 const handles = data.result.terminals.map((terminal) => terminal && terminal.handle);
 if (!handles.every((handle) => typeof handle === "string" && handle.length > 0 && !handle.includes("\n"))) process.exit(1);
 process.stdout.write(handles.join("\n"));
@@ -828,6 +829,59 @@ fm_backend_orca_meta_team_append() {  # <meta-path> <expected-generation> <expec
   new_keys="${expected_keys:+$expected_keys }$pane_key"
   new_terminals="${terminals:+$terminals }$terminal"
   fm_backend_orca_meta_team_write "$meta" "$expected_generation" "$expected_keys" "$new_keys" "$new_terminals"
+}
+
+fm_backend_orca_meta_team_adopt_cleanup() {  # <meta-path> <expected-worktree-id> <pane-key> <terminal-handle>
+  local meta=$1 expected_worktree_id=$2 pane_key=$3 terminal=$4 backend current_worktree keys terminals new_keys new_terminals tmp status=0
+  fm_backend_orca_pane_key_valid "$pane_key" || return 1
+  [ -n "$expected_worktree_id" ] && [ -n "$terminal" ] || return 1
+  fm_meta_lock_acquire "$meta" || return 1
+  if [ -f "$meta" ]; then
+    backend=$(grep '^backend=' "$meta" 2>/dev/null | tail -1 | cut -d= -f2- || true)
+    current_worktree=$(grep '^orca_worktree_id=' "$meta" 2>/dev/null | tail -1 | cut -d= -f2- || true)
+    keys=$(grep '^orca_team_pane_keys=' "$meta" 2>/dev/null | tail -1 | cut -d= -f2- || true)
+    terminals=$(grep '^orca_team_terminals=' "$meta" 2>/dev/null | tail -1 | cut -d= -f2- || true)
+    [ "$backend" = orca ] || status=1
+    [ "$current_worktree" = "$expected_worktree_id" ] || status=1
+  else
+    status=1
+  fi
+  if [ "$status" -eq 0 ] && ! fm_backend_orca_team_list_contains "$keys" "$pane_key"; then
+    new_keys="${keys:+$keys }$pane_key"
+    new_terminals="${terminals:+$terminals }$terminal"
+    tmp="$meta.tmp.$$"
+    awk -v keys="$new_keys" -v terminals="$new_terminals" '
+      BEGIN { wrote_policy = 0; wrote_keys = 0; wrote_terminals = 0 }
+      /^team_edit_policy=/ {
+        if (!wrote_policy) print "team_edit_policy=coordinator-only"
+        wrote_policy = 1
+        next
+      }
+      /^orca_team_pane_keys=/ {
+        if (!wrote_keys) print "orca_team_pane_keys=" keys
+        wrote_keys = 1
+        next
+      }
+      /^orca_team_terminals=/ {
+        if (!wrote_terminals) print "orca_team_terminals=" terminals
+        wrote_terminals = 1
+        next
+      }
+      { print }
+      END {
+        if (!wrote_policy) print "team_edit_policy=coordinator-only"
+        if (!wrote_keys) print "orca_team_pane_keys=" keys
+        if (!wrote_terminals) print "orca_team_terminals=" terminals
+      }
+    ' "$meta" > "$tmp" || status=$?
+    if [ "$status" -eq 0 ]; then
+      mv "$tmp" "$meta" || status=$?
+    else
+      rm -f "$tmp"
+    fi
+  fi
+  fm_meta_lock_release "$meta"
+  return "$status"
 }
 
 fm_backend_orca_meta_team_remove() {  # <meta-path> <expected-generation> <pane-key>

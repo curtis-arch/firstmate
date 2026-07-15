@@ -1532,7 +1532,7 @@ orca_stale_handle_recovery_adopts_one_connected_match() {
   orca_recovery_meta "$state" recoverz1 term-old \
     11111111-1111-4111-8111-111111111111:22222222-2222-4222-8222-222222222222
   printf '{"ok":false,"error":{"code":"terminal_handle_stale","message":"stale"}}\n' > "$RESP/1.out"
-  printf '{"ok":true,"result":{"terminals":[{"handle":"term-other"},{"handle":"term-new"}]}}\n' > "$RESP/2.out"
+  printf '{"ok":true,"result":{"terminals":[{"handle":"term-other"},{"handle":"term-new"}],"totalCount":2,"truncated":false}}\n' > "$RESP/2.out"
   printf '{"ok":true,"result":{"terminal":{"worktreeId":"repo::/other","tabId":"11111111-1111-4111-8111-111111111111","leafId":"22222222-2222-4222-8222-222222222222","connected":true,"writable":true}}}\n' > "$RESP/3.out"
   printf '{"ok":true,"result":{"terminal":{"worktreeId":"repo::/scratch","tabId":"11111111-1111-4111-8111-111111111111","leafId":"22222222-2222-4222-8222-222222222222","connected":true,"writable":true}}}\n' > "$RESP/4.out"
   printf '{"ok":true,"result":{"terminal":{"tail":["recovered output"]}}}\n' > "$RESP/5.out"
@@ -1560,7 +1560,7 @@ orca_stale_handle_recovery_rejects_zero_and_duplicate_matches() {
   orca_recovery_meta "$state" recoverzero term-old \
     11111111-1111-4111-8111-111111111111:22222222-2222-4222-8222-222222222222
   printf '{"ok":false,"error":{"code":"terminal_handle_stale"}}\n' > "$RESP/1.out"
-  printf '{"ok":true,"result":{"terminals":[{"handle":"term-other"}]}}\n' > "$RESP/2.out"
+  printf '{"ok":true,"result":{"terminals":[{"handle":"term-other"}],"totalCount":1,"truncated":false}}\n' > "$RESP/2.out"
   printf '{"ok":true,"result":{"terminal":{"worktreeId":"repo::/scratch","tabId":"33333333-3333-4333-8333-333333333333","leafId":"44444444-4444-4444-8444-444444444444","connected":true,"writable":true}}}\n' > "$RESP/3.out"
   out=$( PATH="$FB:$PATH" FM_ORCA_LOG="$LOG" FM_ORCA_RESPONSES="$RESP" FM_STATE_OVERRIDE="$state" \
     bash -c '. "$0/bin/fm-backend.sh"; fm_backend_capture orca term-old 5' "$ROOT" 2>&1 )
@@ -1575,7 +1575,7 @@ orca_stale_handle_recovery_rejects_zero_and_duplicate_matches() {
   orca_recovery_meta "$state" recoverdup term-old \
     11111111-1111-4111-8111-111111111111:22222222-2222-4222-8222-222222222222
   printf '{"ok":false,"error":{"code":"terminal_handle_stale"}}\n' > "$RESP/1.out"
-  printf '{"ok":true,"result":{"terminals":[{"handle":"term-a"},{"handle":"term-b"}]}}\n' > "$RESP/2.out"
+  printf '{"ok":true,"result":{"terminals":[{"handle":"term-a"},{"handle":"term-b"}],"totalCount":2,"truncated":false}}\n' > "$RESP/2.out"
   printf '{"ok":true,"result":{"terminal":{"worktreeId":"repo::/scratch","tabId":"11111111-1111-4111-8111-111111111111","leafId":"22222222-2222-4222-8222-222222222222","connected":true,"writable":true}}}\n' > "$RESP/3.out"
   printf '{"ok":true,"result":{"terminal":{"worktreeId":"repo::/scratch","tabId":"11111111-1111-4111-8111-111111111111","leafId":"22222222-2222-4222-8222-222222222222","connected":true,"writable":true}}}\n' > "$RESP/4.out"
   out=$( PATH="$FB:$PATH" FM_ORCA_LOG="$LOG" FM_ORCA_RESPONSES="$RESP" FM_STATE_OVERRIDE="$state" \
@@ -1596,7 +1596,7 @@ orca_stale_handle_recovery_rejects_disconnected_and_unresolved_candidates() {
   orca_recovery_meta "$state" recoverdead term-old \
     11111111-1111-4111-8111-111111111111:22222222-2222-4222-8222-222222222222
   printf '{"ok":false,"error":{"code":"terminal_handle_stale"}}\n' > "$RESP/1.out"
-  printf '{"ok":true,"result":{"terminals":[{"handle":"term-dead"}]}}\n' > "$RESP/2.out"
+  printf '{"ok":true,"result":{"terminals":[{"handle":"term-dead"}],"totalCount":1,"truncated":false}}\n' > "$RESP/2.out"
   printf '{"ok":true,"result":{"terminal":{"worktreeId":"repo::/scratch","tabId":"11111111-1111-4111-8111-111111111111","leafId":"22222222-2222-4222-8222-222222222222","connected":false,"writable":false}}}\n' > "$RESP/3.out"
   out=$( PATH="$FB:$PATH" FM_ORCA_LOG="$LOG" FM_ORCA_RESPONSES="$RESP" FM_STATE_OVERRIDE="$state" \
     bash -c '. "$0/bin/fm-backend.sh"; fm_backend_capture orca term-old 5' "$ROOT" 2>&1 )
@@ -1611,7 +1611,7 @@ orca_stale_handle_recovery_rejects_disconnected_and_unresolved_candidates() {
   orca_recovery_meta "$state" recoverunresolved term-old \
     11111111-1111-4111-8111-111111111111:22222222-2222-4222-8222-222222222222
   printf '{"ok":false,"error":{"code":"terminal_handle_stale"}}\n' > "$RESP/1.out"
-  printf '{"ok":true,"result":{"terminals":[{"handle":"term-unreadable"},{"handle":"term-other"}]}}\n' > "$RESP/2.out"
+  printf '{"ok":true,"result":{"terminals":[{"handle":"term-unreadable"},{"handle":"term-other"}],"totalCount":2,"truncated":false}}\n' > "$RESP/2.out"
   printf '{"ok":false,"error":{"code":"runtime_unavailable"}}\n' > "$RESP/3.out"
   printf '{"ok":true,"result":{"terminal":{"worktreeId":"repo::/scratch","tabId":"33333333-3333-4333-8333-333333333333","leafId":"44444444-4444-4444-8444-444444444444","connected":true,"writable":true}}}\n' > "$RESP/4.out"
   out=$( PATH="$FB:$PATH" FM_ORCA_LOG="$LOG" FM_ORCA_RESPONSES="$RESP" FM_STATE_OVERRIDE="$state" \

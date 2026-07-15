@@ -40,6 +40,11 @@ if [ "${1:-}" = status ] && [ "${FM_ORCA_STATUS_RESPONSE:-ready}" != sequence ];
 fi
 n=$next
 echo "$n" > "$COUNT_FILE"
+if [ "${1:-} ${2:-}" = "terminal create" ] && [ -n "${FM_ORCA_CREATE_RACE_META:-}" ]; then
+  printf 'orca_team_pane_keys=%s\norca_team_terminals=%s\n' \
+    "${FM_ORCA_CREATE_RACE_PANE_KEY:?}" "${FM_ORCA_CREATE_RACE_TERMINAL:?}" >> "$FM_ORCA_CREATE_RACE_META"
+  [ -z "${FM_ORCA_CREATE_RACE_LIFECYCLE:-}" ] || printf 'lifecycle=%s\n' "$FM_ORCA_CREATE_RACE_LIFECYCLE" >> "$FM_ORCA_CREATE_RACE_META"
+fi
 if [ -f "$RESP/$n.exit" ]; then
   exit "$(cat "$RESP/$n.exit")"
 fi
@@ -237,6 +242,28 @@ test_team_resolve_pane_gone_after_clean_enumeration() {
   pass "fm_backend_orca_team_resolve_pane: zero matches after clean enumeration is definitively gone"
 }
 
+test_team_resolve_pane_rejects_incomplete_enumeration() {
+  local status
+  orca_case resolve-truncated
+  list_json term_coord | sed 's/"truncated":false/"truncated":true/' > "$RESP/1.out"
+  set +e
+  PATH="$FB:$PATH" FM_ORCA_LOG="$LOG" FM_ORCA_RESPONSES="$RESP" \
+    bash -c '. "$0/bin/backends/orca.sh"; fm_backend_orca_team_resolve_pane "$1" "$2"' "$ROOT" "$WTID" "$MATE_PANE" 2>/dev/null
+  status=$?
+  set -e
+  [ "$status" -eq 1 ] || fail "truncated enumeration must be unresolved (exit 1), got $status"
+
+  orca_case resolve-count-mismatch
+  list_json term_coord | sed 's/"totalCount":1/"totalCount":2/' > "$RESP/1.out"
+  set +e
+  PATH="$FB:$PATH" FM_ORCA_LOG="$LOG" FM_ORCA_RESPONSES="$RESP" \
+    bash -c '. "$0/bin/backends/orca.sh"; fm_backend_orca_team_resolve_pane "$1" "$2"' "$ROOT" "$WTID" "$MATE_PANE" 2>/dev/null
+  status=$?
+  set -e
+  [ "$status" -eq 1 ] || fail "count-mismatched enumeration must be unresolved (exit 1), got $status"
+  pass "fm_backend_orca_team_resolve_pane: partial inventories never prove absence"
+}
+
 test_team_resolve_pane_unreadable_candidate_is_unresolved() {
   local status
   orca_case resolve-unreadable
@@ -392,9 +419,11 @@ test_fm_team_command_timeout_closes_uncontracted_pane() {
   write_team_meta "$state/team-task.meta" gen-1
   create_json term_mate_1 "$MATE_PANE" fm-team-task-mate-1 > "$RESP/1.out"
   printf '1\n' > "$RESP/2.exit"
-  : > "$RESP/3.out"
-  list_json term_coord > "$RESP/4.out"
-  show_json term_coord "$COORD_PANE" true true > "$RESP/5.out"
+  list_json term_mate_1 > "$RESP/3.out"
+  show_json term_mate_1 "$MATE_PANE" true true > "$RESP/4.out"
+  : > "$RESP/5.out"
+  list_json term_coord > "$RESP/6.out"
+  show_json term_coord "$COORD_PANE" true true > "$RESP/7.out"
 
   set +e
   out=$( PATH="$FB:$PATH" FM_ORCA_LOG="$LOG" FM_ORCA_RESPONSES="$RESP" \
@@ -414,6 +443,105 @@ test_fm_team_command_timeout_closes_uncontracted_pane() {
   pass "fm-team.sh add: tui-idle timeout closes and removes the uncontracted pane"
 }
 
+test_fm_team_command_rollback_resolves_reminted_handle() {
+  local state out rc log_text
+  orca_case team-command-reminted-rollback
+  state="$CASE_DIR/state"
+  mkdir -p "$state"
+  touch "$state/.last-watcher-beat"
+  write_team_meta "$state/team-task.meta" gen-1
+  create_json term_mate_old "$MATE_PANE" fm-team-task-mate-1 > "$RESP/1.out"
+  printf '1\n' > "$RESP/2.exit"
+  list_json term_mate_current > "$RESP/3.out"
+  show_json term_mate_current "$MATE_PANE" true true > "$RESP/4.out"
+  : > "$RESP/5.out"
+  list_json term_coord > "$RESP/6.out"
+  show_json term_coord "$COORD_PANE" true true > "$RESP/7.out"
+
+  set +e
+  out=$( PATH="$FB:$PATH" FM_ORCA_LOG="$LOG" FM_ORCA_RESPONSES="$RESP" \
+    FM_ROOT_OVERRIDE="$ROOT" FM_STATE_OVERRIDE="$state" \
+    "$ROOT/bin/fm-team.sh" add team-task --command codex 2>&1 )
+  rc=$?
+  set -e
+
+  [ "$rc" -ne 0 ] || fail "a tui-idle timeout must fail after handle remint"
+  log_text=$(cat "$LOG")
+  assert_contains "$log_text" $'orca\x1f''terminal'$'\x1f''close'$'\x1f''--terminal'$'\x1f''term_mate_current' \
+    "rollback did not close the current handle resolved from the pane key"
+  assert_not_contains "$log_text" $'orca\x1f''terminal'$'\x1f''close'$'\x1f''--terminal'$'\x1f''term_mate_old' \
+    "rollback trusted the stale creation-time handle"
+  assert_no_grep 'orca_team_pane_keys=' "$state/team-task.meta" \
+    "verified rollback retained the uncontracted pane record"
+  pass "fm-team.sh add: contract rollback resolves the current durable pane handle"
+}
+
+test_fm_team_cas_rollback_closes_by_pane_key() {
+  local state out rc log_text
+  orca_case team-cas-close
+  state="$CASE_DIR/state"
+  mkdir -p "$state"
+  touch "$state/.last-watcher-beat"
+  write_team_meta "$state/team-task.meta" gen-1
+  create_json term_mate_old "$MATE_PANE" fm-team-task-mate-1 > "$RESP/1.out"
+  list_json term_mate_current > "$RESP/2.out"
+  show_json term_mate_current "$MATE_PANE" true true > "$RESP/3.out"
+  : > "$RESP/4.out"
+  list_json term_coord > "$RESP/5.out"
+  show_json term_coord "$COORD_PANE" true true > "$RESP/6.out"
+
+  set +e
+  out=$( PATH="$FB:$PATH" FM_ORCA_LOG="$LOG" FM_ORCA_RESPONSES="$RESP" \
+    FM_ORCA_CREATE_RACE_META="$state/team-task.meta" \
+    FM_ORCA_CREATE_RACE_PANE_KEY="$MATE2_PANE" FM_ORCA_CREATE_RACE_TERMINAL=term_mate_2 \
+    FM_ROOT_OVERRIDE="$ROOT" FM_STATE_OVERRIDE="$state" \
+    "$ROOT/bin/fm-team.sh" add team-task 2>&1 )
+  rc=$?
+  set -e
+
+  [ "$rc" -ne 0 ] || fail "a teammate CAS race must fail the add"
+  log_text=$(cat "$LOG")
+  assert_contains "$log_text" $'orca\x1f''terminal'$'\x1f''close'$'\x1f''--terminal'$'\x1f''term_mate_current' \
+    "CAS rollback did not close the current pane-key-resolved handle"
+  assert_grep "orca_team_pane_keys=$MATE2_PANE" "$state/team-task.meta" \
+    "CAS rollback overwrote the winning teammate record"
+  assert_no_grep "$MATE_PANE" "$state/team-task.meta" \
+    "conclusive CAS rollback retained the closed pane"
+  pass "fm-team.sh add: CAS rollback closes by durable pane key without overwriting the winner"
+}
+
+test_fm_team_cas_rollback_preserves_cleanup_ownership() {
+  local state out rc
+  orca_case team-cas-preserve
+  state="$CASE_DIR/state"
+  mkdir -p "$state"
+  touch "$state/.last-watcher-beat"
+  write_team_meta "$state/team-task.meta" gen-1
+  create_json term_mate_1 "$MATE_PANE" fm-team-task-mate-1 > "$RESP/1.out"
+  printf '1\n' > "$RESP/2.exit"
+
+  set +e
+  out=$( PATH="$FB:$PATH" FM_ORCA_LOG="$LOG" FM_ORCA_RESPONSES="$RESP" \
+    FM_ORCA_CREATE_RACE_META="$state/team-task.meta" \
+    FM_ORCA_CREATE_RACE_PANE_KEY="$MATE2_PANE" FM_ORCA_CREATE_RACE_TERMINAL=term_mate_2 \
+    FM_ORCA_CREATE_RACE_LIFECYCLE=teardown:winning-owner \
+    FM_ROOT_OVERRIDE="$ROOT" FM_STATE_OVERRIDE="$state" \
+    "$ROOT/bin/fm-team.sh" add team-task 2>&1 )
+  rc=$?
+  set -e
+
+  [ "$rc" -ne 0 ] || fail "an inconclusive teammate CAS rollback must fail the add"
+  assert_contains "$out" "remains recorded for teardown" \
+    "inconclusive CAS rollback did not report retained cleanup ownership"
+  assert_grep "orca_team_pane_keys=$MATE2_PANE $MATE_PANE" "$state/team-task.meta" \
+    "inconclusive CAS rollback did not merge cleanup ownership with the winner"
+  assert_grep 'orca_team_terminals=term_mate_2 term_mate_1' "$state/team-task.meta" \
+    "cleanup ownership lost the paired terminal cache"
+  assert_grep 'lifecycle=teardown:winning-owner' "$state/team-task.meta" \
+    "cleanup ownership merge overwrote the winning lifecycle claim"
+  pass "fm-team.sh add: inconclusive CAS rollback merges ownership into the winning metadata"
+}
+
 test_fm_team_unconfirmed_contract_closes_uncontracted_pane() {
   local state out rc
   orca_case team-command-unconfirmed
@@ -426,9 +554,11 @@ test_fm_team_unconfirmed_contract_closes_uncontracted_pane() {
   printf '{"ok":true,"result":{"send":{"handle":"term_mate_1","accepted":true}}}\n' > "$RESP/3.out"
   printf '{"ok":true,"result":{"send":{"handle":"term_mate_1","accepted":true}}}\n' > "$RESP/4.out"
   printf '{"ok":true,"result":{"terminal":{"tail":["unrecognized composer"]}}}\n' > "$RESP/5.out"
-  : > "$RESP/6.out"
-  list_json term_coord > "$RESP/7.out"
-  show_json term_coord "$COORD_PANE" true true > "$RESP/8.out"
+  list_json term_mate_1 > "$RESP/6.out"
+  show_json term_mate_1 "$MATE_PANE" true true > "$RESP/7.out"
+  : > "$RESP/8.out"
+  list_json term_coord > "$RESP/9.out"
+  show_json term_coord "$COORD_PANE" true true > "$RESP/10.out"
 
   set +e
   out=$( PATH="$FB:$PATH" FM_ORCA_LOG="$LOG" FM_ORCA_RESPONSES="$RESP" \
@@ -630,6 +760,7 @@ test_meta_team_remove_drops_matching_pair
 test_meta_identity_covers_team_contract
 test_team_resolve_pane_exact_match
 test_team_resolve_pane_gone_after_clean_enumeration
+test_team_resolve_pane_rejects_incomplete_enumeration
 test_team_resolve_pane_unreadable_candidate_is_unresolved
 test_team_resolve_pane_duplicates_are_unresolved
 test_team_pane_state_working_and_done
@@ -638,6 +769,9 @@ test_team_pane_state_fails_closed_to_unknown
 test_fm_team_add_records_verified_pane
 test_fm_team_command_always_receives_coordinator_contract
 test_fm_team_command_timeout_closes_uncontracted_pane
+test_fm_team_command_rollback_resolves_reminted_handle
+test_fm_team_cas_rollback_closes_by_pane_key
+test_fm_team_cas_rollback_preserves_cleanup_ownership
 test_fm_team_unconfirmed_contract_closes_uncontracted_pane
 test_fm_team_add_closes_pane_without_durable_identity
 test_fm_team_add_refuses_non_orca_and_claimed_meta
