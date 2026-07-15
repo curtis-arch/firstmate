@@ -125,6 +125,20 @@ test_classify_check_and_unknown_escalate() {
   pass "check + unknown escalate; heartbeat self-handles"
 }
 
+test_attention_wake_escalates_distinctly() {
+  local dir state out reason
+  dir=$(make_supercase classify-attention)
+  state="$dir/state"
+  reason="attention: term-orca-attn (agent blocked)"
+  is_wake_reason "$reason" || fail "daemon did not recognize the attention wake vocabulary"
+  out=$(classify_attention "$reason")
+  case "$out" in escalate\|*"agent blocked"*) ;; *) fail "attention classifier did not preserve and escalate detail: $out" ;; esac
+  FM_STATE_OVERRIDE="$state" handle_wake "$reason" "$state"
+  assert_grep 'attention: term-orca-attn (agent blocked)' "$state/.subsuper-escalations" \
+    "daemon did not buffer the distinct attention reason"
+  pass "daemon recognizes and escalates a distinct attention wake"
+}
+
 test_stale_transient_self_records_marker() {
   local dir state out key
   dir=$(make_supercase stale-transient)
@@ -1660,6 +1674,7 @@ test_daemon_state_root_uses_fm_home
 test_classify_routine_signal_self
 test_classify_terminal_signal_escalates
 test_classify_check_and_unknown_escalate
+test_attention_wake_escalates_distinctly
 test_stale_transient_self_records_marker
 test_stale_terminal_escalates
 test_stale_paused_classifies_pause

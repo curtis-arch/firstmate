@@ -1784,6 +1784,35 @@ orca_agent_disappearance_after_exit_reports_dead() {
   pass "orca_agent_disappearance_after_exit_reports_dead"
 }
 
+orca_attention_states_are_alive_and_distinguishable() {
+  local out state n
+  for state in waiting blocked; do
+    orca_case "liveness-attention-$state"
+    n=1
+    while [ "$n" -le 5 ]; do
+      printf '{"ok":true,"result":{"terminal":{"worktreeId":"repo::/scratch","tabId":"11111111-1111-4111-8111-111111111111","leafId":"22222222-2222-4222-8222-222222222222","connected":true,"writable":true}}}\n' > "$RESP/$n.out"
+      n=$((n + 1))
+      printf '{"ok":true,"result":{"worktrees":[{"worktreeId":"repo::/scratch","agents":[{"paneKey":"11111111-1111-4111-8111-111111111111:22222222-2222-4222-8222-222222222222","state":"%s"}]}]}}\n' "$state" > "$RESP/$n.out"
+      n=$((n + 1))
+    done
+    out=$( PATH="$FB:$PATH" FM_ORCA_LOG="$LOG" FM_ORCA_RESPONSES="$RESP" \
+      bash -c '. "$0/bin/fm-backend.sh"; printf "%s/%s/%s" "$(fm_backend_busy_state orca term-recorded repo::/scratch)" "$(fm_backend_attention_state orca term-recorded repo::/scratch)" "$(fm_backend_agent_alive orca term-recorded repo::/scratch)"' "$ROOT" )
+    [ "$out" = "attention/$state/alive" ] || fail "$state must be alive attention with preserved detail, got '$out'"
+  done
+  pass "orca_attention_states_are_alive_and_distinguishable"
+}
+
+orca_parent_child_inventory_selects_only_exact_coordinator_pane() {
+  local state
+  orca_case liveness-parent-child
+  printf '{"ok":true,"result":{"terminal":{"worktreeId":"repo::/scratch","tabId":"11111111-1111-4111-8111-111111111111","leafId":"22222222-2222-4222-8222-222222222222","connected":true,"writable":true}}}\n' > "$RESP/1.out"
+  printf '{"ok":true,"result":{"worktrees":[{"worktreeId":"repo::/scratch","agents":[{"paneKey":"33333333-3333-4333-8333-333333333333:44444444-4444-4444-8444-444444444444","state":"working","parentPaneKey":"11111111-1111-4111-8111-111111111111:22222222-2222-4222-8222-222222222222"},{"paneKey":"11111111-1111-4111-8111-111111111111:22222222-2222-4222-8222-222222222222","state":"waiting"}]}]}}\n' > "$RESP/2.out"
+  state=$( PATH="$FB:$PATH" FM_ORCA_LOG="$LOG" FM_ORCA_RESPONSES="$RESP" \
+    bash -c '. "$0/bin/fm-backend.sh"; fm_backend_attention_state orca term-recorded repo::/scratch' "$ROOT" )
+  [ "$state" = waiting ] || fail "parent/child relation overrode exact coordinator paneKey equality: '$state'"
+  pass "orca_parent_child_inventory_selects_only_exact_coordinator_pane"
+}
+
 orca_snapshot_rejects_cross_worktree_placeholder_and_duplicates() {
   local cross placeholder duplicate_worktrees duplicate_agents
   orca_case liveness-identity-rejections
@@ -1816,7 +1845,7 @@ orca_snapshot_rejects_errors_malformed_json_and_unknown_states() {
   printf '{"ok":true,"result":{"terminal":{"worktreeId":"repo::/scratch","tabId":"11111111-1111-4111-8111-111111111111","leafId":"22222222-2222-4222-8222-222222222222","connected":true,"writable":true}}}\n' > "$RESP/5.out"
   printf '{not-json\n' > "$RESP/6.out"
   printf '{"ok":true,"result":{"terminal":{"worktreeId":"repo::/scratch","tabId":"11111111-1111-4111-8111-111111111111","leafId":"22222222-2222-4222-8222-222222222222","connected":true,"writable":true}}}\n' > "$RESP/7.out"
-  printf '{"ok":true,"result":{"worktrees":[{"worktreeId":"repo::/scratch","agents":[{"paneKey":"11111111-1111-4111-8111-111111111111:22222222-2222-4222-8222-222222222222","state":"waiting"}]}]}}\n' > "$RESP/8.out"
+  printf '{"ok":true,"result":{"worktrees":[{"worktreeId":"repo::/scratch","agents":[{"paneKey":"11111111-1111-4111-8111-111111111111:22222222-2222-4222-8222-222222222222","state":"mystery"}]}]}}\n' > "$RESP/8.out"
   printf '{"ok":true,"result":{"terminal":{"worktreeId":"repo::/scratch","tabId":"11111111-1111-4111-8111-111111111111","leafId":"22222222-2222-4222-8222-222222222222","connected":false,"writable":true}}}\n' > "$RESP/9.out"
   printf '{"ok":true,"result":{"terminal":{"worktreeId":"repo::/scratch","tabId":"11111111-1111-4111-8111-111111111111","leafId":"22222222-2222-4222-8222-222222222222","connected":true,"writable":true}}}\n' > "$RESP/10.out"
   printf '{"ok":true,"result":{"worktrees":[{"worktreeId":"repo::/scratch","agents":[null]}]}}\n' > "$RESP/11.out"
@@ -1845,14 +1874,15 @@ non_orca_backend_busy_and_liveness_dispatch_remain_unchanged() {
     fm_backend_source() { return 0; }
     fm_backend_herdr_busy_state() { printf busy; }
     fm_backend_herdr_agent_alive() { printf alive; }
-    printf "%s/%s/%s/%s/%s" \
+    printf "%s/%s/%s/%s/%s/%s" \
       "$(fm_backend_busy_state herdr session:pane)" \
       "$(fm_backend_agent_alive herdr session:pane)" \
       "$(fm_backend_busy_state tmux session:pane)" \
       "$(fm_backend_busy_state zellij session:pane)" \
-      "$(fm_backend_agent_alive cmux workspace:surface)"
+      "$(fm_backend_agent_alive cmux workspace:surface)" \
+      "$(fm_backend_attention_state herdr session:pane)"
   ' "$ROOT")
-  [ "$out" = busy/alive/unknown/unknown/unknown ] || fail "non-Orca dispatcher behavior changed: $out"
+  [ "$out" = busy/alive/unknown/unknown/unknown/unknown ] || fail "non-Orca dispatcher behavior changed: $out"
   pass "non_orca_backend_busy_and_liveness_dispatch_remain_unchanged"
 }
 
@@ -2009,6 +2039,8 @@ orca_recovery_triggers_only_for_stale_and_requires_new_metadata
 orca_pane_key_validation_is_strict
 orca_snapshot_selects_only_recorded_worktree_and_matching_agent
 orca_busy_and_alive_map_only_working_and_turn_complete_done
+orca_attention_states_are_alive_and_distinguishable
+orca_parent_child_inventory_selects_only_exact_coordinator_pane
 orca_agent_disappearance_after_exit_reports_dead
 orca_snapshot_rejects_cross_worktree_placeholder_and_duplicates
 orca_snapshot_rejects_errors_malformed_json_and_unknown_states

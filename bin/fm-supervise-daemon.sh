@@ -388,6 +388,10 @@ classify_check() {  # <full reason>  — check scripts print only when firstmate
   printf 'escalate|%s' "$1"
 }
 
+classify_attention() {  # <full reason>
+  printf 'escalate|%s' "$1"
+}
+
 classify_heartbeat() {
   # The wake itself is routine; the catch-all scan runs separately in
   # housekeeping on the HEARTBEAT_SCAN_SECS cadence.
@@ -1160,7 +1164,7 @@ should_force_self() {  # <reason>
 is_wake_reason() {  # <reason>
   local reason=$1
   case "$reason" in
-    signal:*|stale:*|check:*|heartbeat|heartbeat:*) return 0 ;;
+    signal:*|stale:*|attention:*|check:*|heartbeat|heartbeat:*) return 0 ;;
   esac
   return 1
 }
@@ -1179,6 +1183,8 @@ handle_wake() {  # <reason> <state>
               decision=$(classify_signal "$arg" "$state") ;;
     stale:*)  kind=stale; arg="${reason#stale: }"
               decision=$(classify_stale "$arg" "$state") ;;
+    attention:*) kind=attention; arg="${reason#attention: }"
+                 decision=$(classify_attention "$reason") ;;
     check:*)  decision=$(classify_check "$reason") ;;
     heartbeat|heartbeat:*) decision=$(classify_heartbeat) ;;
     *)        decision=$(classify_unknown "$reason") ;;

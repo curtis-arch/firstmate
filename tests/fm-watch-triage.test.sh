@@ -1118,6 +1118,37 @@ test_afk_paused_changed_pane_hands_off_plain_stale() {
   pass "AFK changed paused panes hand off plain stale identities for daemon-owned pause triage"
 }
 
+test_orca_attention_wakes_immediately_with_distinguishable_reason() {
+  local dir state fakebin out drain_out pid
+  dir=$(make_case orca-attention); state="$dir/state"; fakebin="$dir/fakebin"
+  out="$dir/watch.out"; drain_out="$dir/drain.out"
+  fm_write_meta "$state/orca-attn.meta" "window=fm-orca-attn" "terminal=term-orca-attn" \
+    "backend=orca" "orca_worktree_id=repo::/scratch" "kind=ship"
+  cat > "$fakebin/orca" <<'SH'
+#!/usr/bin/env bash
+case "$1 $2" in
+  "terminal show")
+    printf '%s\n' '{"ok":true,"result":{"terminal":{"worktreeId":"repo::/scratch","tabId":"11111111-1111-4111-8111-111111111111","leafId":"22222222-2222-4222-8222-222222222222","connected":true,"writable":true}}}'
+    ;;
+  "worktree ps")
+    printf '%s\n' '{"ok":true,"result":{"worktrees":[{"worktreeId":"repo::/scratch","agents":[{"paneKey":"11111111-1111-4111-8111-111111111111:22222222-2222-4222-8222-222222222222","state":"waiting"}]}]}}'
+    ;;
+esac
+SH
+  chmod +x "$fakebin/orca"
+  watch_bg "$state" "$fakebin" "$out"
+  pid=$!
+  wait_for_exit "$pid" 40 || fail "Orca waiting state did not produce an immediate attention wake"
+  grep -Fx "attention: term-orca-attn (agent waiting)" "$out" >/dev/null \
+    || fail "Orca attention wake did not preserve waiting detail: $(cat "$out")"
+  [ "$(cat "$state/.attention-term-orca-attn" 2>/dev/null || true)" = waiting ] \
+    || fail "Orca attention state was not deduplicated"
+  FM_STATE_OVERRIDE="$state" "$DRAIN" > "$drain_out" 2>/dev/null || fail "attention wake drain failed"
+  grep "$(printf '\tattention\t')" "$drain_out" | grep -F "agent waiting" >/dev/null \
+    || fail "Orca attention wake was not queued distinctly"
+  pass "Orca attention states wake immediately with a distinct durable reason"
+}
+
 test_signal_reason_is_actionable_classifier
 test_stale_is_terminal_classifier
 test_scan_captain_relevant_statuses_classifier
@@ -1151,3 +1182,4 @@ test_heartbeat_backstop_surfaces_unsurfaced_status
 test_beacon_stays_fresh_while_absorbing
 test_afk_present_reverts_watcher_to_one_shot
 test_afk_paused_changed_pane_hands_off_plain_stale
+test_orca_attention_wakes_immediately_with_distinguishable_reason

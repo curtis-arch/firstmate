@@ -15,7 +15,7 @@
 # fixed mapping logic, no heuristics and no LLM. Output is one stable, parseable,
 # token-tight line firstmate can read every heartbeat:
 #
-#   state: <working|parked|done|blocked|paused|failed|unknown> · source: <run-step|pane|status-log|none> · <detail>
+#   state: <working|parked|done|blocked|paused|failed|unknown> · source: <run-step|pane|backend-agent|status-log|none> · <detail>
 #
 # Logic, in order:
 #   1. Resolve worktree + backend target + kind from state/<id>.meta.
@@ -554,6 +554,17 @@ fi
 # unknown rather than trusting a possibly-stale status log as the current state.
 [ -n "$BACKEND_TARGET" ] || emit unknown none "no backend target recorded"
 pane_readable "$BACKEND_TARGET" || emit unknown none "backend target gone: $BACKEND_TARGET"
+
+# A native attention state is stronger than idle-pane/status-log fallback but
+# does not override an authoritative run-step above. Preserve the backend's
+# waiting-vs-blocked detail while using the existing actionable blocked state.
+if [ "$TASK_BACKEND" = orca ]; then
+  worktree_id=$(fm_meta_get "$META" orca_worktree_id)
+  ATTENTION_STATE=$(fm_backend_attention_state orca "$BACKEND_TARGET" "$worktree_id" 2>/dev/null)
+  case "$ATTENTION_STATE" in
+    waiting|blocked) emit blocked backend-agent "Orca agent $ATTENTION_STATE" ;;
+  esac
+fi
 
 # Secondmates idle on their own watcher (idle pane = healthy), so the busy
 # signature is not meaningful for them; read their state from the status log only.
