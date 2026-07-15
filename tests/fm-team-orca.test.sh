@@ -352,6 +352,37 @@ test_fm_team_add_records_verified_pane() {
   pass "fm-team.sh add: verified creation shape becomes a recorded plural identity"
 }
 
+test_fm_team_command_always_receives_coordinator_contract() {
+  local state out rc log_text
+  orca_case team-command-contract
+  state="$CASE_DIR/state"
+  mkdir -p "$state"
+  touch "$state/.last-watcher-beat"
+  write_team_meta "$state/team-task.meta" gen-1
+  create_json term_mate_1 "$MATE_PANE" fm-team-task-mate-1 > "$RESP/1.out"
+  printf '{"ok":true}\n' > "$RESP/2.out"
+  printf '{"ok":true,"result":{"send":{"handle":"term_mate_1","accepted":true}}}\n' > "$RESP/3.out"
+  printf '{"ok":true,"result":{"send":{"handle":"term_mate_1","accepted":true}}}\n' > "$RESP/4.out"
+  printf '{"ok":true,"result":{"terminal":{"tail":["╭──╮","│ > │","╰──╯"]}}}\n' > "$RESP/5.out"
+
+  set +e
+  out=$( PATH="$FB:$PATH" FM_ORCA_LOG="$LOG" FM_ORCA_RESPONSES="$RESP" \
+    FM_ROOT_OVERRIDE="$ROOT" FM_STATE_OVERRIDE="$state" \
+    "$ROOT/bin/fm-team.sh" add team-task --command codex 2>&1 )
+  rc=$?
+  set -e
+
+  expect_code 0 "$rc" "raw teammate command should receive the contract without requiring a brief"$'\n'"$out"
+  log_text=$(cat "$LOG")
+  assert_contains "$log_text" $'orca\x1f''terminal'$'\x1f''create'$'\x1f''--worktree'$'\x1f'"id:$WTID"$'\x1f''--title'$'\x1f''fm-team-task-mate-1'$'\x1f''--command'$'\x1f''codex' \
+    "raw teammate command was not preserved"
+  assert_contains "$log_text" "team_edit_policy=coordinator-only" \
+    "raw teammate command did not receive the coordinator-only contract"
+  assert_contains "$out" "delivered coordinator-only edit contract" \
+    "team add did not report contract delivery"
+  pass "fm-team.sh add: raw agent commands always receive the coordinator-only contract"
+}
+
 test_fm_team_add_closes_pane_without_durable_identity() {
   local state out rc
   orca_case team-add-no-panekey
@@ -541,6 +572,7 @@ test_team_pane_state_working_and_done
 test_team_pane_state_no_agent_and_gone
 test_team_pane_state_fails_closed_to_unknown
 test_fm_team_add_records_verified_pane
+test_fm_team_command_always_receives_coordinator_contract
 test_fm_team_add_closes_pane_without_durable_identity
 test_fm_team_add_refuses_non_orca_and_claimed_meta
 test_fm_team_close_verifies_gone_then_removes_record

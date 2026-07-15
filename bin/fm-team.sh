@@ -14,10 +14,10 @@
 # Concurrent-edit policy: firstmate does not pretend multiple writers in one
 # worktree are safe. The coordinator terminal owns every file edit, git stage,
 # and commit; teammate panes are advisory (review, test runs, investigation)
-# and must report findings back as text. `add --command ... --brief-file ...`
-# prepends this contract to the teammate brief - the one enforcement point
-# firstmate controls at launch - and the existing teardown dirty/unlanded
-# checks on the single task worktree remain the backstop for violations.
+# and must report findings back as text. Every `add --command ...` waits for
+# the teammate agent and delivers this contract before any optional brief; the
+# existing teardown dirty/unlanded checks on the single task worktree remain
+# the backstop for violations.
 #
 # Fail-closed rules:
 #   - add refuses unless the task meta exists, is active (no lifecycle claim),
@@ -122,22 +122,25 @@ team_add() {
     return 1
   fi
   echo "team: recorded teammate pane $pane_key (terminal $terminal, title $title) for $ID"
-  if [ -n "$brief_file" ]; then
+  if [ -n "$command" ]; then
     if ! orca terminal wait --terminal "$terminal" --for tui-idle --timeout-ms 60000 --json >/dev/null 2>&1; then
-      echo "warning: teammate agent did not reach tui-idle within 60s; pane stays recorded - deliver the brief later via the recorded pane" >&2
+      echo "warning: teammate agent did not reach tui-idle within 60s; pane stays recorded - deliver the coordinator-only contract later via the recorded pane" >&2
       return 1
     fi
     local preamble brief
     preamble="Team contract for task $ID: this pane shares the task worktree with the coordinator. The coordinator terminal owns ALL file edits, git staging, and commits (team_edit_policy=coordinator-only). Do not modify files or run state-changing git commands; report findings back as text."
-    brief="$preamble
+    brief=$preamble
+    if [ -n "$brief_file" ]; then
+      brief="$preamble
 
 $(cat "$brief_file")"
+    fi
     state=$(fm_backend_orca_send_text_submit "$terminal" "$brief" 5 1 1 "")
     if [ "$state" != empty ]; then
       echo "warning: teammate brief submission reported '$state'; verify the pane before relying on it" >&2
       return 1
     fi
-    echo "team: delivered brief with coordinator-only edit contract to $pane_key"
+    echo "team: delivered coordinator-only edit contract to $pane_key"
   fi
 }
 

@@ -209,6 +209,7 @@ SPAWN_REPLACEMENT_LIFECYCLE=
 SPAWN_ABORT_BACKEND=
 SPAWN_ABORT_TARGET=
 SPAWN_ABORT_TARGET_CLEANUP=0
+SPAWN_REPLACEMENT_PRESERVE=0
 
 parse_orca_worktree_result() {
   local raw=$1 rest terminal_rest
@@ -236,13 +237,11 @@ parse_orca_worktree_result() {
 }
 
 orca_spawn_abort_cleanup() {
-  local status=$? meta_tmp current_lifecycle replacement_target_closed=1
+  local status=$? meta_tmp current_lifecycle replacement_target_presence=absent
   if [ "$SPAWN_ABORT_TARGET_CLEANUP" = 1 ]; then
     SPAWN_ABORT_TARGET_CLEANUP=0
     fm_backend_kill "$SPAWN_ABORT_BACKEND" "$SPAWN_ABORT_TARGET" "" "$W" 2>/dev/null || true
-    if fm_backend_target_exists "$SPAWN_ABORT_BACKEND" "$SPAWN_ABORT_TARGET" "$W" 2>/dev/null; then
-      replacement_target_closed=0
-    fi
+    replacement_target_presence=$(fm_backend_target_presence "$SPAWN_ABORT_BACKEND" "$SPAWN_ABORT_TARGET" "$W" 2>/dev/null)
   fi
   if [ "$ORCA_ABORT_CLEANUP" = 1 ]; then
     ORCA_ABORT_CLEANUP=0
@@ -283,10 +282,12 @@ orca_spawn_abort_cleanup() {
   fi
   if [ "$SPAWN_REPLACEMENT_ACTIVE" = 1 ]; then
     current_lifecycle=$(fm_meta_value_unlocked "$SPAWN_META" lifecycle 2>/dev/null || true)
-    if [ "$current_lifecycle" = "$SPAWN_REPLACEMENT_LIFECYCLE" ] && [ "$replacement_target_closed" = 1 ]; then
+    if [ "$current_lifecycle" = "$SPAWN_REPLACEMENT_LIFECYCLE" ] \
+      && [ "$SPAWN_REPLACEMENT_PRESERVE" != 1 ] \
+      && [ "$replacement_target_presence" = absent ]; then
       rm -f "$SPAWN_META" || true
     elif [ "$current_lifecycle" = "$SPAWN_REPLACEMENT_LIFECYCLE" ]; then
-      echo "warning: preserved replacement ownership for $ID because endpoint $SPAWN_ABORT_TARGET could not be verified closed" >&2
+      echo "warning: preserved replacement ownership for $ID because replacement endpoint closure could not be verified" >&2
     fi
     SPAWN_REPLACEMENT_ACTIVE=0
   fi
@@ -770,7 +771,15 @@ if [ "$KIND" = secondmate ] && [ -n "${FM_SPAWN_REPLACE_GENERATION:-}" ]; then
     echo "error: could not reserve secondmate replacement for $ID" >&2
     exit 1
   }
-  [ -z "$replaced_target" ] || fm_backend_kill "$replaced_backend" "$replaced_target" 2>/dev/null || true
+  if [ -n "$replaced_target" ]; then
+    fm_backend_kill "$replaced_backend" "$replaced_target" "" "fm-$ID" 2>/dev/null || true
+    replaced_presence=$(fm_backend_target_presence "$replaced_backend" "$replaced_target" "fm-$ID" 2>/dev/null)
+    if [ "$replaced_presence" != absent ]; then
+      SPAWN_REPLACEMENT_PRESERVE=1
+      echo "error: old secondmate endpoint $replaced_target closure is $replaced_presence; preserving replacement ownership and refusing to create a replacement" >&2
+      exit 1
+    fi
+  fi
 fi
 
 real_path_or_raw() {  # <path>

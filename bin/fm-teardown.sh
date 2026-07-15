@@ -130,6 +130,21 @@ trap release_teardown_claim EXIT
 teardown_begin_mutation() {
   TEARDOWN_MUTATION_STARTED=1
 }
+
+quiesce_secondmate_endpoint() {
+  local presence
+  [ "$KIND" = secondmate ] || return 0
+  [ "$PARENT_ENDPOINT_QUIESCED" != 1 ] || return 0
+  [ -z "$T" ] || fm_backend_kill "$BACKEND" "$T" "$(meta_value "$META" zellij_tab_id)" "fm-$ID" 2>/dev/null || true
+  if [ -n "$T" ]; then
+    presence=$(fm_backend_target_presence "$BACKEND" "$T" "fm-$ID" 2>/dev/null)
+    if [ "$presence" != absent ]; then
+      echo "error: secondmate endpoint $T closure is $presence; preserving home and metadata" >&2
+      return 1
+    fi
+  fi
+  PARENT_ENDPOINT_QUIESCED=1
+}
 WT=$(grep '^worktree=' "$META" | cut -d= -f2-)
 T=$(grep '^window=' "$META" | cut -d= -f2-)
 PROJ=$(grep '^project=' "$META" | cut -d= -f2-)
@@ -1093,12 +1108,7 @@ TEARDOWN_IDENTITY=$(fm_meta_claim_teardown "$META" "$META_IDENTITY" "$TEARDOWN_O
 if [ "$KIND" = secondmate ] && [ "$FORCE" = "--force" ]; then
   validate_firstmate_home_children_removal "$HOME_PATH" || exit 1
   teardown_begin_mutation
-  [ -z "$T" ] || fm_backend_kill "$BACKEND" "$T" "$(meta_value "$META" zellij_tab_id)" "fm-$ID" 2>/dev/null || true
-  if [ -n "$T" ] && fm_backend_target_exists "$BACKEND" "$T" "fm-$ID" 2>/dev/null; then
-    echo "error: secondmate endpoint $T remained live; refusing child cleanup" >&2
-    exit 1
-  fi
-  PARENT_ENDPOINT_QUIESCED=1
+  quiesce_secondmate_endpoint || exit 1
 fi
 
 if [ -d "$WT" ] && [ "$FORCE" != "--force" ]; then
@@ -1116,6 +1126,10 @@ if [ -d "$WT" ] && [ "$FORCE" != "--force" ]; then
 fi
 
 [ "$TEARDOWN_MUTATION_STARTED" = 1 ] || teardown_begin_mutation
+
+if [ "$KIND" = secondmate ]; then
+  quiesce_secondmate_endpoint || exit 1
+fi
 
 if [ "$KIND" = secondmate ] && [ "$FORCE" = "--force" ]; then
   cleanup_firstmate_home_children "$HOME_PATH"
