@@ -200,21 +200,6 @@ window_is_busy() {  # <window> <tail40>
   esac
 }
 
-# Preserve a backend-native attention detail without teaching the watcher any
-# Orca state names. Backends without this narrow signal report unknown and keep
-# the existing hash/busy fallback behavior.
-window_attention_state() {  # <window> -> waiting|blocked|none|unknown
-  local w=$1 backend meta worktree_id
-  backend=$(window_backend "$w")
-  if [ "$backend" = orca ]; then
-    meta=$(fm_backend_meta_for_window "$w" "$STATE" 2>/dev/null || true)
-    worktree_id=$(fm_meta_get "$meta" orca_worktree_id)
-    fm_backend_attention_state orca "$w" "$worktree_id" 2>/dev/null
-  else
-    printf 'unknown'
-  fi
-}
-
 window_kind() {
   local w=$1 meta kind
   meta=$(fm_backend_meta_for_window "$w" "$STATE" 2>/dev/null || true)
@@ -785,23 +770,6 @@ EOF
     fi
     if [ "$kind" = secondmate ] && ! status_is_paused "$last"; then
       continue
-    fi
-    if [ "$backend" = orca ]; then
-      attention=$(window_attention_state "$w")
-      af=$(printf '%s' "$w" | tr ':/.' '___')
-      af="$STATE/.attention-$af"
-      case "$attention" in
-        waiting|blocked)
-          if [ "$(cat "$af" 2>/dev/null || true)" != "$attention" ]; then
-            reason="attention: $w (agent $attention)"
-            fm_wake_append attention "$w" "$reason" || exit 1
-            printf '%s' "$attention" > "$af"
-            wake "$reason"
-          fi
-          continue
-          ;;
-        *) rm -f "$af" ;;
-      esac
     fi
     tail40=$(fm_backend_capture "$backend" "$w" 40 "$(window_label "$w")" 2>/dev/null) || continue
     h=$(printf '%s' "$tail40" | hash_pane)

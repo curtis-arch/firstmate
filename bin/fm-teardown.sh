@@ -130,6 +130,21 @@ trap release_teardown_claim EXIT
 teardown_begin_mutation() {
   TEARDOWN_MUTATION_STARTED=1
 }
+
+quiesce_secondmate_endpoint() {
+  local presence
+  [ "$KIND" = secondmate ] || return 0
+  [ "$PARENT_ENDPOINT_QUIESCED" != 1 ] || return 0
+  [ -z "$T" ] || fm_backend_kill "$BACKEND" "$T" "$(meta_value "$META" zellij_tab_id)" "fm-$ID" 2>/dev/null || true
+  if [ -n "$T" ]; then
+    presence=$(fm_backend_target_presence "$BACKEND" "$T" "fm-$ID" 2>/dev/null)
+    if [ "$presence" != absent ]; then
+      echo "error: secondmate endpoint $T closure is $presence; preserving home and metadata" >&2
+      return 1
+    fi
+  fi
+  PARENT_ENDPOINT_QUIESCED=1
+}
 WT=$(grep '^worktree=' "$META" | cut -d= -f2-)
 T=$(grep '^window=' "$META" | cut -d= -f2-)
 PROJ=$(grep '^project=' "$META" | cut -d= -f2-)
@@ -678,18 +693,17 @@ require_orca_worktree_path_match_if_present() {
   require_orca_worktree_path_match "$worktree_id" "$inspected"
 }
 
-# Enumerate and close every task-owned teammate pane recorded in the meta
-# (orca_team_pane_keys=, written only by bin/fm-team.sh) before the Orca
-# worktree is removed. Fail closed: a pane that cannot be proven gone -
+# Enumerate and close every task-owned teammate pane plus any handle-only
+# cleanup terminal recorded in the meta before the Orca worktree is removed.
+# Fail closed: an endpoint that cannot be proven gone -
 # resolution ambiguity, or still present after close - refuses teardown unless
 # --force, the captain's explicit discard path, which downgrades the refusal
 # to a warning. Landing/dirty-work safety is untouched: this runs strictly
 # after those checks, immediately before endpoint/worktree cleanup.
 close_orca_team_panes() {  # <meta-path> <worktree-id> <force-flag>
-  local meta=$1 worktree_id=$2 force=$3 keys key resolved rc handle status=0
+  local meta=$1 worktree_id=$2 force=$3 keys cleanup_terminals key resolved rc handle status=0
   fm_backend_source orca || return 1
   keys=$(fm_backend_orca_team_pane_keys "$meta")
-  [ -n "$keys" ] || return 0
   for key in $keys; do
     if resolved=$(fm_backend_orca_team_resolve_pane "$worktree_id" "$key" 2>/dev/null); then
       handle=${resolved%%$'\t'*}
@@ -708,6 +722,19 @@ close_orca_team_panes() {  # <meta-path> <worktree-id> <force-flag>
       else
         echo "REFUSED: teammate pane $key could not be proven closed before Orca worktree removal." >&2
         echo "Inspect it with bin/fm-team.sh status, close it explicitly with bin/fm-team.sh close, or use --force after explicit discard approval." >&2
+        status=1
+      fi
+    fi
+  done
+  cleanup_terminals=$(fm_backend_orca_team_cleanup_terminals "$meta")
+  for handle in $cleanup_terminals; do
+    fm_backend_orca_raw_close "$handle" >/dev/null 2>&1 || true
+    if ! fm_backend_orca_terminal_handle_absent "$handle"; then
+      if [ "$force" = "--force" ]; then
+        echo "warning: cleanup terminal $handle could not be proven closed; continuing under --force" >&2
+      else
+        echo "REFUSED: cleanup terminal $handle could not be proven closed before Orca worktree removal." >&2
+        echo "Resume teardown after Orca reports the handle stale, or use --force after explicit discard approval." >&2
         status=1
       fi
     fi
@@ -1093,12 +1120,7 @@ TEARDOWN_IDENTITY=$(fm_meta_claim_teardown "$META" "$META_IDENTITY" "$TEARDOWN_O
 if [ "$KIND" = secondmate ] && [ "$FORCE" = "--force" ]; then
   validate_firstmate_home_children_removal "$HOME_PATH" || exit 1
   teardown_begin_mutation
-  [ -z "$T" ] || fm_backend_kill "$BACKEND" "$T" "$(meta_value "$META" zellij_tab_id)" "fm-$ID" 2>/dev/null || true
-  if [ -n "$T" ] && fm_backend_target_exists "$BACKEND" "$T" "fm-$ID" 2>/dev/null; then
-    echo "error: secondmate endpoint $T remained live; refusing child cleanup" >&2
-    exit 1
-  fi
-  PARENT_ENDPOINT_QUIESCED=1
+  quiesce_secondmate_endpoint || exit 1
 fi
 
 if [ -d "$WT" ] && [ "$FORCE" != "--force" ]; then
@@ -1116,6 +1138,10 @@ if [ -d "$WT" ] && [ "$FORCE" != "--force" ]; then
 fi
 
 [ "$TEARDOWN_MUTATION_STARTED" = 1 ] || teardown_begin_mutation
+
+if [ "$KIND" = secondmate ]; then
+  quiesce_secondmate_endpoint || exit 1
+fi
 
 if [ "$KIND" = secondmate ] && [ "$FORCE" = "--force" ]; then
   cleanup_firstmate_home_children "$HOME_PATH"

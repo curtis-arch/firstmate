@@ -642,7 +642,7 @@ fm_backend_worktree_presence() {  # <backend> <worktree-id>
   esac
 }
 
-# fm_backend_busy_state: semantic busy/idle/attention/unknown for backends that expose
+# fm_backend_busy_state: semantic busy/idle/unknown for backends that expose
 # native agent-state. Orca additionally requires the recorded worktree id as
 # its third argument so its runtime-global inventory stays scoped to the task.
 # Backends with no such primitive (tmux) report unknown. Callers own the fallback policy: fm-watch.sh
@@ -658,23 +658,6 @@ fm_backend_busy_state() {  # <backend> <target> [recorded-worktree-id]
     orca)
       meta=$(fm_backend_orca_meta_for_target "$1" 2>/dev/null || true)
       fm_backend_orca_busy_state "$@" "$meta"
-      ;;
-    *) printf 'unknown' ;;
-  esac
-}
-
-# fm_backend_attention_state: backend-neutral detail for a conclusive
-# `attention` busy-state verdict. Prints waiting|blocked|none|unknown. Only Orca
-# currently exposes this evidence; every other backend remains unchanged and
-# reports unknown.
-fm_backend_attention_state() {  # <backend> <target> [recorded-worktree-id]
-  local backend=$1 meta
-  shift
-  fm_backend_source "$backend" || { printf 'unknown'; return 0; }
-  case "$backend" in
-    orca)
-      meta=$(fm_backend_orca_meta_for_target "$1" 2>/dev/null || true)
-      fm_backend_orca_attention_state "$@" "$meta"
       ;;
     *) printf 'unknown' ;;
   esac
@@ -759,6 +742,57 @@ fm_backend_target_exists() {  # <backend> <target> [expected-label]
   esac
 }
 
+fm_backend_target_presence() {  # <backend> <target> [expected-label] -> present|absent|unknown
+  local backend=$1 target=$2 expected_label=${3:-} session pane out code count
+  fm_backend_source "$backend" || { printf 'unknown'; return 0; }
+  if fm_backend_target_exists "$backend" "$target" "$expected_label"; then
+    printf 'present'
+    return 0
+  fi
+  case "$backend" in
+    tmux)
+      session=${target%%:*}
+      [ -n "$session" ] && [ "$session" != "$target" ] || { printf 'unknown'; return 0; }
+      out=$(tmux list-windows -t "$session" -F '#{session_name}:#{window_name}	#{window_id}' 2>/dev/null) \
+        || { printf 'unknown'; return 0; }
+      if printf '%s\n' "$out" | awk -F '\t' -v target="$target" '$1 == target || $2 == target { found=1 } END { exit !found }'; then
+        printf 'present'
+      else
+        printf 'absent'
+      fi
+      ;;
+    herdr)
+      fm_backend_herdr_parse_target "$target" || { printf 'unknown'; return 0; }
+      session=$FM_BACKEND_HERDR_SESSION
+      pane=$FM_BACKEND_HERDR_PANE
+      out=$(fm_backend_herdr_cli "$session" pane get "$pane" 2>&1 || true)
+      code=$(printf '%s' "$out" | jq -r '.error.code // empty' 2>/dev/null)
+      if [ "$code" = pane_not_found ]; then
+        printf 'absent'
+      elif [ -n "$code" ]; then
+        printf 'unknown'
+      elif [ "$(printf '%s' "$out" | jq -r '.result.pane.pane_id // empty' 2>/dev/null)" = "$pane" ]; then
+        printf 'present'
+      else
+        printf 'unknown'
+      fi
+      ;;
+    zellij)
+      fm_backend_zellij_parse_target "$target" || { printf 'unknown'; return 0; }
+      out=$(fm_backend_zellij_cli "$FM_BACKEND_ZELLIJ_SESSION" action list-panes --json 2>/dev/null) \
+        || { printf 'unknown'; return 0; }
+      count=$(printf '%s' "$out" | jq -r --argjson p "$FM_BACKEND_ZELLIJ_PANE" \
+        'if type == "array" then [.[]? | select(.id == $p and .is_plugin == false)] | length else "invalid" end' 2>/dev/null)
+      case "$count" in
+        0) printf 'absent' ;;
+        1) printf 'present' ;;
+        *) printf 'unknown' ;;
+      esac
+      ;;
+    *) printf 'unknown' ;;
+  esac
+}
+
 # fm_backend_agent_alive: CONFIDENT liveness of a live harness-agent PROCESS
 # under <target>, distinct from fm_backend_target_exists's pane-PRESENCE-only
 # check above. A secondmate agent that has exited leaves its backend endpoint
@@ -766,8 +800,7 @@ fm_backend_target_exists() {  # <backend> <target> [expected-label]
 # "alive" because the pane itself still exists, which is exactly the gap
 # bin/fm-bootstrap.sh's session-start secondmate-liveness sweep exists to
 # close (AGENTS.md "Session start"). Prints one of:
-#   alive   - a real agent process is confirmed running, including an agent
-#             waiting or blocked on attention.
+#   alive   - a real agent process is confirmed running.
 #   dead    - CONFIDENTLY not an agent: a bare shell (tmux) or a
 #             structurally-gone/no-agent-registered pane (herdr).
 #   unknown - anything ambiguous, unreadable, or unverified for this backend.

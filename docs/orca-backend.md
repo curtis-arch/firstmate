@@ -89,9 +89,9 @@ Operation routing:
   The bordered row is classified through the shared composer classifier; a bare shell prompt has no genuine composer row and reads `unknown`, not confirmed empty.
 - `fm-send.sh --key Enter` and `--key C-c` are supported.
 - `fm-watch.sh` joins the recorded terminal to Orca's native per-agent state through `terminal show` and `worktree ps`.
-  A verified `working` agent is busy, a verified turn-complete `done` agent is idle, and an exact-match `waiting` or `blocked` agent is alive but emits a distinct `attention:` wake; every unknown result retains the existing terminal-tail fallback.
+  A verified `working` agent is busy and a verified turn-complete `done` agent is idle; every unobserved state retains the existing terminal-tail fallback.
 - `fm-crew-state.sh` reads the recorded Orca terminal when no no-mistakes run-step applies.
-  Exact-match `waiting` and `blocked` states report actionable `state: blocked` with `source: backend-agent` and preserve the native state in the detail.
+  Native agent-state handling is limited to the observed `working`, `done`, and empty-agent shapes.
 
 Stale-handle recovery:
 
@@ -147,7 +147,7 @@ The existing isolated ship/scout worktree assertion is untouched: teammates neve
 
 Concurrent-edit policy: firstmate does not pretend multiple writers in one worktree are safe.
 `coordinator-only` is the only supported policy: the coordinator owns every file edit, git stage, and commit; teammate panes are advisory (review, tests, investigation) and report findings as text.
-Enforcement points are the ones firstmate actually controls: `fm-team.sh add --command ... --brief-file ...` prepends the contract to the teammate brief at launch, and teardown's existing dirty/unlanded checks on the single task worktree remain the backstop for violations.
+Enforcement points are the ones firstmate actually controls: every `fm-team.sh add --command ...` waits for the teammate agent and delivers the contract before any optional brief; a timeout or unconfirmed submission closes the new terminal, proves its pane absent, and removes its record. Teardown's existing dirty/unlanded checks on the single task worktree remain the backstop for violations.
 
 Lifecycle, all fail-closed on ambiguity:
 
@@ -174,8 +174,7 @@ The coordinator's accepted E1b liveness contract is unchanged: coordinator `dead
   A missing event is not proof of a clean agent exit: unreadable, disconnected, or otherwise unjoinable endpoint state remains `unknown`, and Firstmate must fail closed instead of reporting `dead` or authorizing recovery action from that signal alone.
 - Pane-key durability across an actual observed app restart remains unverified.
   Orca source defines pane keys as persisted remint-stable identities and the recovery path is fail-closed, but the first natural or captain-approved restart still needs the documented post-restart smoke check.
-- The `waiting` and `blocked` attention mapping is evidence-limited.
-  The state names and requested supervision policy are fixture-backed, but this change did not perform a new live Orca transition capture proving what runtime conditions produce either state.
+- `waiting` and `blocked` remain unrecognized and normalize to `unknown` because a bounded live probe could not produce either state deterministically.
 
 ## Verification
 
@@ -285,18 +284,11 @@ The normalized snapshot parser lives in `bin/backends/orca.sh` and is reached on
 Runtime-global aggregate worktree status and first-agent selection are never used.
 Orca remains a pull backend, so this does not add event waits or replace the watcher loop.
 
-### Attention-state extension - fixture-backed, evidence-limited (2026-07-15)
+### Unobserved attention states - rejected (2026-07-15)
 
-The attention extension preserves the E1b exact join unchanged: one connected, writable terminal resolves to one exact worktree and exactly one agent whose `paneKey` equals `tabId:leafId`.
-Parent or child relationship fields do not participate in selection, and a child row cannot override the exact coordinator row.
-Duplicate worktrees, duplicate exact pane matches, cross-worktree identities, absent exact matches, malformed rows, and unknown state strings remain `unknown` and retain the prior fail-closed fallback.
-
-The backend-neutral busy-state vocabulary now includes `attention`, with a separate detail accessor returning `waiting` or `blocked`.
-Both states map to semantic `attention` and liveness `alive`, never `dead`, `busy`, or ordinary `idle`.
-The polling watcher emits and durably queues `attention: <terminal> (agent waiting|blocked)` once per state edge, and the away-mode daemon escalates that wake directly rather than aging it through the stale-pane wedge timer.
-
-This section records an implementation policy and fixture evidence, not a new runtime observation.
-No live Orca command was run for this change, so the causal meaning of `waiting` versus `blocked` remains evidence-limited until a disposable task captures both transitions with the exact E1b join commands.
+A bounded public-CLI probe created one disposable non-agent terminal with `orca terminal create --command 'sleep 20'`, read `orca worktree ps --json` once, and closed the terminal.
+The terminal increased `liveTerminalCount` but did not appear in `agents[]`, so the probe provided no deterministic way to produce either `waiting` or `blocked` without launching an LLM agent.
+The snapshot parser therefore accepts only the previously observed `working` and `done` rows plus the observed empty-agent shape; `waiting`, `blocked`, and every other state normalize to `unknown` for both semantic state and liveness, with no Orca-specific attention routing.
 
 ### Durable endpoint E2 - P2 accepted (2026-07-14)
 
@@ -337,7 +329,7 @@ Fake-Orca tests cover:
 - rejection of undocumented terminal-handle result shapes;
 - runtime readiness gating through `orca status --json`;
 - exact `terminal show` to `worktree ps` semantic joins, including `working`, turn-complete `done`, and post-exit agent disappearance;
-- exact-match `waiting` and `blocked` attention mapping, alive liveness, watcher/daemon escalation, and crew-state detail;
+- rejection of unobserved `waiting` and `blocked` rows as unknown semantic state and unknown liveness;
 - parent-plus-child inventories where only exact `paneKey` equality selects the coordinator;
 - fail-closed handling for malformed/error JSON, cross-worktree and duplicate identities, placeholder ids, disconnected terminals, and unknown states;
 - creation-time and show-fallback `orca_pane_key` capture;
