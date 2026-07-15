@@ -476,14 +476,21 @@ After any merge you perform without asking the captain, post a one-line "merged 
 
 ### Validate
 
-For `no-mistakes`-mode ship tasks, when a crewmate's status says `done`, trigger validation using the crew's harness from `state/<id>.meta`.
-Load `harness-adapters` for the target harness's skill invocation form; natural language also works if uncertain.
+At feature or sprint kickoff, define the complete delivery unit and name exactly one delivery-owner task; record both in every implementation-lane and delivery-owner brief for that unit.
+Implementation lanes self-review their scoped diff, run targeted tests, commit, and report completion to the delivery owner through Firstmate; they never invoke `no-mistakes` independently.
+The delivery owner integrates the complete unit, confirms every lane reported its self-review and targeted tests, performs its own integration self-review and targeted tests, commits, and reports the unit ready.
+Only after that report may Firstmate explicitly steer the delivery owner to invoke one end-of-delivery `no-mistakes` gate using the owner's harness from `state/<id>.meta`.
+Load `harness-adapters` for that harness's skill invocation form; natural language also works if uncertain.
+Secondmates use this same contract inside their isolated homes because they are Firstmates; never create a parallel secondmate validation path.
 
-The task worker that starts a no-mistakes run drives the pipeline (review, test, document, lint, push, PR, CI) itself and owns every `no-mistakes axi run` and `no-mistakes axi respond` call through the next gate or outcome.
+The delivery owner that starts the one no-mistakes run drives the pipeline (review, test, document, lint, push, PR, CI) itself and owns every `no-mistakes axi run` and `no-mistakes axi respond` call through the next gate or outcome.
 The ship brief intentionally does not restate no-mistakes gate mechanics; it points the crewmate to the version-matched SKILL.md loaded by `/no-mistakes`, `no-mistakes axi run --help`, and per-response `help` lines.
 Firstmate's wrapper stays narrow: `ask-user` findings return through `needs-decision`, and CI-green completion is reported as `done: PR {url} checks green`.
 Firstmate never invokes `no-mistakes axi respond` for a crew-owned run.
-Instead, Firstmate sends the same task worker one exact single-line `fm-send` decision naming the decision key, step, action, finding IDs where applicable, instructions where applicable, and exact command to execute; it requires a matching `resolved` event carrying the same key, forbids `--yes`, and requires the worker to process every synchronous return until completion or a genuinely new escalation.
+Firstmate owns the decision on every finding and never blindly authorizes recursive review-fix rounds.
+It may authorize one contained fix round by naming the decision key, step, action, finding IDs, scope, and exact command in one single-line `fm-send` decision to the delivery owner.
+The decision requires a matching `resolved` event carrying the same key, forbids `--yes`, and requires the owner to process every synchronous return until completion or a genuinely new escalation.
+If review after that contained fix round finds any new material defect, the owner parks the run and returns the finding to Firstmate for a fresh decision instead of authorizing or implementing another fix round.
 After `fm-send` verifies submission, Firstmate immediately resumes fleet supervision.
 That checks-green status is owed at the CI-ready return point, when `/no-mistakes` first reports CI green, not after the monitor-until-merge loop observes the PR merged or closed.
 Use chat for yes/no decisions; use lavish-axi when there are multiple findings or options to triage.

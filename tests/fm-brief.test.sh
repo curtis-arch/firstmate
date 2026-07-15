@@ -83,6 +83,30 @@ test_no_mistakes_dod_wording() {
   pass "fm-brief.sh: no-mistakes DOD wording avoids the apostrophe regression"
 }
 
+test_no_mistakes_delivery_unit_contract() {
+  local home id brief
+  home="$TMP_ROOT/delivery-unit-home"
+  mkdir -p "$home/data"
+  id="brief-delivery-unit-b2"
+  FM_HOME="$home" "$ROOT/bin/fm-brief.sh" "$id" some-proj >/dev/null 2>&1
+  brief="$home/data/$id/brief.md"
+  assert_grep 'delivery unit **{DELIVERY_UNIT}**' "$brief" \
+    "no-mistakes brief does not require a named delivery unit"
+  assert_grep 'single delivery-owner task is **{DELIVERY_OWNER}**' "$brief" \
+    "no-mistakes brief does not require exactly one delivery owner"
+  assert_grep 'Implementation lanes never invoke /no-mistakes independently.' "$brief" \
+    "no-mistakes brief allows lane-local gates"
+  assert_grep 'confirms every lane reported self-review and targeted tests' "$brief" \
+    "no-mistakes brief does not require the owner to confirm lane validation"
+  assert_grep 'exactly once, only after Firstmate explicitly steers it' "$brief" \
+    "no-mistakes brief does not reserve the end gate for an explicit Firstmate steer"
+  assert_grep 'Firstmate may authorize one contained fix round' "$brief" \
+    "no-mistakes brief does not bound the finding fix round"
+  assert_grep 'new material defect, park and return it to Firstmate' "$brief" \
+    "no-mistakes brief does not park a new material defect after the fix round"
+  pass "fm-brief.sh: no-mistakes briefs carry the delivery-unit validation contract"
+}
+
 test_ship_project_memory_wording() {
   local home id brief
   home="$TMP_ROOT/project-memory-home"
@@ -270,6 +294,7 @@ test_script_parses
 test_help_includes_entire_header
 test_ship_modes_generate_clean_briefs
 test_no_mistakes_dod_wording
+test_no_mistakes_delivery_unit_contract
 test_ship_project_memory_wording
 test_herdr_lab_contract_is_explicit_and_complete
 test_herdr_lab_contract_quotes_foreign_firstmate_path
