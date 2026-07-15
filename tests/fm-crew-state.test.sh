@@ -1143,25 +1143,6 @@ EOF
   pass "crew_is_provably_working still surfaces a genuinely stopped crew (safety property preserved)"
 }
 
-test_orca_attention_reports_actionable_backend_state() {
-  reset_fakes
-  local d out state
-  d=$(new_case orca-attention)
-  mkdir -p "$d/wt"
-  make_fakebin "$d" >/dev/null
-  fm_write_meta "$d/state/orca-attn.meta" "window=fm-orca-attn" "terminal=term-orca-attn" \
-    "backend=orca" "orca_worktree_id=repo::/scratch" "worktree=$d/wt" "kind=scout"
-  for state in waiting blocked; do
-    FM_FAKE_ORCA_AGENT_STATE=$state
-    out=$(run_crew_state "$d" orca-attn)
-    assert_contains "$out" "state: blocked" "Orca $state was not actionable"
-    assert_contains "$out" "source: backend-agent" "Orca $state did not preserve its native source"
-    assert_contains "$out" "Orca agent $state" "Orca $state detail was lost"
-    assert_not_contains "$out" "state: unknown" "Orca $state fell through to idle/unknown"
-  done
-  pass "Orca waiting and blocked report an actionable backend-agent state"
-}
-
 # Usage error (no id) is the one non-zero exit.
 test_usage_error() {
   reset_fakes
@@ -1213,7 +1194,6 @@ test_torn_down_worktree
 test_missing_meta
 test_provably_working_via_runs_list_fallback
 test_not_provably_working_when_stopped
-test_orca_attention_reports_actionable_backend_state
 test_usage_error
 
 echo "all fm-crew-state tests passed"

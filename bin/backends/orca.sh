@@ -471,13 +471,6 @@ fm_backend_orca_busy_state() {  # <terminal-id> <recorded-worktree-id> [meta-pat
   esac
 }
 
-fm_backend_orca_attention_state() {  # <terminal-id> <recorded-worktree-id> [meta-path]
-  case "$(fm_backend_orca_agent_snapshot "$@")" in
-    working|done|no-agent) printf 'none' ;;
-    *) printf 'unknown' ;;
-  esac
-}
-
 fm_backend_orca_agent_alive() {  # <terminal-id> <recorded-worktree-id> [meta-path]
   case "$(fm_backend_orca_agent_snapshot "$@")" in
     working|done) printf 'alive' ;;

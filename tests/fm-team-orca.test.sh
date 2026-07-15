@@ -383,6 +383,70 @@ test_fm_team_command_always_receives_coordinator_contract() {
   pass "fm-team.sh add: raw agent commands always receive the coordinator-only contract"
 }
 
+test_fm_team_command_timeout_closes_uncontracted_pane() {
+  local state out rc log_text
+  orca_case team-command-timeout
+  state="$CASE_DIR/state"
+  mkdir -p "$state"
+  touch "$state/.last-watcher-beat"
+  write_team_meta "$state/team-task.meta" gen-1
+  create_json term_mate_1 "$MATE_PANE" fm-team-task-mate-1 > "$RESP/1.out"
+  printf '1\n' > "$RESP/2.exit"
+  : > "$RESP/3.out"
+  list_json term_coord > "$RESP/4.out"
+  show_json term_coord "$COORD_PANE" true true > "$RESP/5.out"
+
+  set +e
+  out=$( PATH="$FB:$PATH" FM_ORCA_LOG="$LOG" FM_ORCA_RESPONSES="$RESP" \
+    FM_ROOT_OVERRIDE="$ROOT" FM_STATE_OVERRIDE="$state" \
+    "$ROOT/bin/fm-team.sh" add team-task --command codex 2>&1 )
+  rc=$?
+  set -e
+
+  [ "$rc" -ne 0 ] || fail "a tui-idle timeout must fail teammate creation"
+  assert_contains "$out" "closed and removed uncontracted teammate pane" \
+    "timeout failure did not report verified cleanup"
+  log_text=$(cat "$LOG")
+  assert_contains "$log_text" $'orca\x1f''terminal'$'\x1f''close'$'\x1f''--terminal'$'\x1f''term_mate_1' \
+    "timeout failure did not close the uncontracted terminal"
+  assert_no_grep 'orca_team_pane_keys=' "$state/team-task.meta" \
+    "timeout failure retained a teammate record after verified absence"
+  pass "fm-team.sh add: tui-idle timeout closes and removes the uncontracted pane"
+}
+
+test_fm_team_unconfirmed_contract_closes_uncontracted_pane() {
+  local state out rc
+  orca_case team-command-unconfirmed
+  state="$CASE_DIR/state"
+  mkdir -p "$state"
+  touch "$state/.last-watcher-beat"
+  write_team_meta "$state/team-task.meta" gen-1
+  create_json term_mate_1 "$MATE_PANE" fm-team-task-mate-1 > "$RESP/1.out"
+  printf '{"ok":true}\n' > "$RESP/2.out"
+  printf '{"ok":true,"result":{"send":{"handle":"term_mate_1","accepted":true}}}\n' > "$RESP/3.out"
+  printf '{"ok":true,"result":{"send":{"handle":"term_mate_1","accepted":true}}}\n' > "$RESP/4.out"
+  printf '{"ok":true,"result":{"terminal":{"tail":["unrecognized composer"]}}}\n' > "$RESP/5.out"
+  : > "$RESP/6.out"
+  list_json term_coord > "$RESP/7.out"
+  show_json term_coord "$COORD_PANE" true true > "$RESP/8.out"
+
+  set +e
+  out=$( PATH="$FB:$PATH" FM_ORCA_LOG="$LOG" FM_ORCA_RESPONSES="$RESP" \
+    FM_ROOT_OVERRIDE="$ROOT" FM_STATE_OVERRIDE="$state" \
+    "$ROOT/bin/fm-team.sh" add team-task --command codex 2>&1 )
+  rc=$?
+  set -e
+
+  [ "$rc" -ne 0 ] || fail "an unconfirmed contract submission must fail teammate creation"
+  assert_contains "$out" "contract submission reported 'unknown'" \
+    "unconfirmed submission did not preserve the failure reason"
+  assert_contains "$out" "closed and removed uncontracted teammate pane" \
+    "unconfirmed submission did not report verified cleanup"
+  assert_no_grep 'orca_team_pane_keys=' "$state/team-task.meta" \
+    "unconfirmed submission retained a teammate record after verified absence"
+  pass "fm-team.sh add: unconfirmed contract closes and removes the uncontracted pane"
+}
+
 test_fm_team_add_closes_pane_without_durable_identity() {
   local state out rc
   orca_case team-add-no-panekey
@@ -573,6 +637,8 @@ test_team_pane_state_no_agent_and_gone
 test_team_pane_state_fails_closed_to_unknown
 test_fm_team_add_records_verified_pane
 test_fm_team_command_always_receives_coordinator_contract
+test_fm_team_command_timeout_closes_uncontracted_pane
+test_fm_team_unconfirmed_contract_closes_uncontracted_pane
 test_fm_team_add_closes_pane_without_durable_identity
 test_fm_team_add_refuses_non_orca_and_claimed_meta
 test_fm_team_close_verifies_gone_then_removes_record

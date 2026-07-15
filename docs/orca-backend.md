@@ -147,7 +147,7 @@ The existing isolated ship/scout worktree assertion is untouched: teammates neve
 
 Concurrent-edit policy: firstmate does not pretend multiple writers in one worktree are safe.
 `coordinator-only` is the only supported policy: the coordinator owns every file edit, git stage, and commit; teammate panes are advisory (review, tests, investigation) and report findings as text.
-Enforcement points are the ones firstmate actually controls: every `fm-team.sh add --command ...` waits for the teammate agent and delivers the contract before any optional brief, and teardown's existing dirty/unlanded checks on the single task worktree remain the backstop for violations.
+Enforcement points are the ones firstmate actually controls: every `fm-team.sh add --command ...` waits for the teammate agent and delivers the contract before any optional brief; a timeout or unconfirmed submission closes the new terminal, proves its pane absent, and removes its record. Teardown's existing dirty/unlanded checks on the single task worktree remain the backstop for violations.
 
 Lifecycle, all fail-closed on ambiguity:
 
@@ -288,7 +288,7 @@ Orca remains a pull backend, so this does not add event waits or replace the wat
 
 A bounded public-CLI probe created one disposable non-agent terminal with `orca terminal create --command 'sleep 20'`, read `orca worktree ps --json` once, and closed the terminal.
 The terminal increased `liveTerminalCount` but did not appear in `agents[]`, so the probe provided no deterministic way to produce either `waiting` or `blocked` without launching an LLM agent.
-The snapshot parser therefore accepts only the previously observed `working` and `done` rows plus the observed empty-agent shape; `waiting`, `blocked`, and every other state normalize to `unknown` for both semantic state and liveness.
+The snapshot parser therefore accepts only the previously observed `working` and `done` rows plus the observed empty-agent shape; `waiting`, `blocked`, and every other state normalize to `unknown` for both semantic state and liveness, with no Orca-specific attention routing.
 
 ### Durable endpoint E2 - P2 accepted (2026-07-14)
 

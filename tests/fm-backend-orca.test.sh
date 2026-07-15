@@ -1911,22 +1911,22 @@ orca_agent_disappearance_after_exit_reports_dead() {
   pass "orca_agent_disappearance_after_exit_reports_dead"
 }
 
-orca_unobserved_attention_states_remain_unknown() {
+orca_unobserved_states_remain_unknown() {
   local out state n
   for state in waiting blocked; do
     orca_case "liveness-attention-$state"
     n=1
-    while [ "$n" -le 5 ]; do
+    while [ "$n" -le 3 ]; do
       printf '{"ok":true,"result":{"terminal":{"worktreeId":"repo::/scratch","tabId":"11111111-1111-4111-8111-111111111111","leafId":"22222222-2222-4222-8222-222222222222","connected":true,"writable":true}}}\n' > "$RESP/$n.out"
       n=$((n + 1))
       printf '{"ok":true,"result":{"worktrees":[{"worktreeId":"repo::/scratch","agents":[{"paneKey":"11111111-1111-4111-8111-111111111111:22222222-2222-4222-8222-222222222222","state":"%s"}]}]}}\n' "$state" > "$RESP/$n.out"
       n=$((n + 1))
     done
     out=$( PATH="$FB:$PATH" FM_ORCA_LOG="$LOG" FM_ORCA_RESPONSES="$RESP" \
-      bash -c '. "$0/bin/fm-backend.sh"; printf "%s/%s/%s" "$(fm_backend_busy_state orca term-recorded repo::/scratch)" "$(fm_backend_attention_state orca term-recorded repo::/scratch)" "$(fm_backend_agent_alive orca term-recorded repo::/scratch)"' "$ROOT" )
-    [ "$out" = "unknown/unknown/unknown" ] || fail "$state must remain unknown without live validation, got '$out'"
+      bash -c '. "$0/bin/fm-backend.sh"; printf "%s/%s" "$(fm_backend_busy_state orca term-recorded repo::/scratch)" "$(fm_backend_agent_alive orca term-recorded repo::/scratch)"' "$ROOT" )
+    [ "$out" = "unknown/unknown" ] || fail "$state must remain unknown without live validation, got '$out'"
   done
-  pass "orca_unobserved_attention_states_remain_unknown"
+  pass "orca_unobserved_states_remain_unknown"
 }
 
 orca_parent_child_inventory_selects_only_exact_observed_coordinator_pane() {
@@ -2001,15 +2001,14 @@ non_orca_backend_busy_and_liveness_dispatch_remain_unchanged() {
     fm_backend_source() { return 0; }
     fm_backend_herdr_busy_state() { printf busy; }
     fm_backend_herdr_agent_alive() { printf alive; }
-    printf "%s/%s/%s/%s/%s/%s" \
+    printf "%s/%s/%s/%s/%s" \
       "$(fm_backend_busy_state herdr session:pane)" \
       "$(fm_backend_agent_alive herdr session:pane)" \
       "$(fm_backend_busy_state tmux session:pane)" \
       "$(fm_backend_busy_state zellij session:pane)" \
-      "$(fm_backend_agent_alive cmux workspace:surface)" \
-      "$(fm_backend_attention_state herdr session:pane)"
+      "$(fm_backend_agent_alive cmux workspace:surface)"
   ' "$ROOT")
-  [ "$out" = busy/alive/unknown/unknown/unknown/unknown ] || fail "non-Orca dispatcher behavior changed: $out"
+  [ "$out" = busy/alive/unknown/unknown/unknown ] || fail "non-Orca dispatcher behavior changed: $out"
   pass "non_orca_backend_busy_and_liveness_dispatch_remain_unchanged"
 }
 
@@ -2167,7 +2166,7 @@ orca_recovery_triggers_only_for_stale_and_requires_new_metadata
 orca_pane_key_validation_is_strict
 orca_snapshot_selects_only_recorded_worktree_and_matching_agent
 orca_busy_and_alive_map_only_working_and_turn_complete_done
-orca_unobserved_attention_states_remain_unknown
+orca_unobserved_states_remain_unknown
 orca_parent_child_inventory_selects_only_exact_observed_coordinator_pane
 orca_agent_disappearance_after_exit_reports_dead
 orca_snapshot_rejects_cross_worktree_placeholder_and_duplicates
