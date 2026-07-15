@@ -196,6 +196,70 @@ fm_backend_orca_worktree_path() {
   printf '%s' "$path"
 }
 
+# Classify one exact terminal/pane identity inside one exact Orca worktree.
+# A complete scoped listing proves the identity alive or absent. Partial,
+# malformed, cross-worktree, or half-matching results stay unknown/mismatched so
+# teardown cannot guess that an owned team child is gone.
+fm_backend_orca_terminal_identity_state() {  # <worktree-id> <terminal-handle> <pane-id>
+  local worktree_id=${1:-} terminal=${2:-} pane_id=${3:-} out
+  [ -n "$worktree_id" ] && [ -n "$terminal" ] && [ -n "$pane_id" ] || { printf 'unknown'; return 0; }
+  fm_backend_orca_tool_check || { printf 'unknown'; return 0; }
+  out=$(orca terminal list --worktree "id:$worktree_id" --limit 1000 --json 2>/dev/null) || {
+    printf 'unknown'
+    return 0
+  }
+  printf '%s' "$out" | node -e '
+const fs = require("fs");
+const expectedWorktree = process.argv[1];
+const expectedTerminal = process.argv[2];
+const expectedPane = process.argv[3];
+let data;
+try {
+  data = JSON.parse(fs.readFileSync(0, "utf8"));
+} catch (_) {
+  process.stdout.write("unknown");
+  process.exit(0);
+}
+if (data.ok === false) {
+  process.stdout.write("unknown");
+  process.exit(0);
+}
+const result = data.result || {};
+if (!Array.isArray(result.terminals)) {
+  process.stdout.write("unknown");
+  process.exit(0);
+}
+const rows = result.terminals;
+const exact = rows.filter((row) =>
+  row && String(row.worktreeId || "") === expectedWorktree &&
+  String(row.handle || "") === expectedTerminal &&
+  String(row.leafId || "") === expectedPane
+);
+if (exact.length === 1) {
+  process.stdout.write("alive");
+  process.exit(0);
+}
+if (exact.length > 1) {
+  process.stdout.write("unknown");
+  process.exit(0);
+}
+const partial = rows.some((row) => row && (
+  String(row.handle || "") === expectedTerminal ||
+  String(row.leafId || "") === expectedPane
+));
+if (partial) {
+  process.stdout.write("mismatch");
+  process.exit(0);
+}
+if (result.truncated === true) {
+  process.stdout.write("unknown");
+  process.exit(0);
+}
+const crossedScope = rows.some((row) => !row || String(row.worktreeId || "") !== expectedWorktree);
+process.stdout.write(crossedScope ? "unknown" : "dead");
+' "$worktree_id" "$terminal" "$pane_id"
+}
+
 fm_backend_orca_capture() {  # <terminal-id> <lines>
   local terminal=$1 lines=${2:-40} out
   fm_backend_orca_tool_check || return 1
