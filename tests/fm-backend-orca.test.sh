@@ -574,8 +574,8 @@ test_spawn_refuses_orca_secondmate_before_home_mutation() {
   status=$?
   set +e
   [ "$status" -ne 0 ] || fail "backend=orca --secondmate should be refused"
-  assert_contains "$out" "backend=orca does not support --secondmate spawns yet" \
-    "orca secondmate refusal should happen at backend selection"
+  assert_contains "$out" "backend=orca does not support --secondmate spawns: Orca has no adopt-existing-directory worktree primitive" \
+    "orca secondmate refusal should name the exact missing Orca primitive"
   assert_absent "$subhome/config/crew-harness" \
     "orca secondmate refusal should not propagate inheritable config into the secondmate home"
   pass "fm-spawn.sh --backend orca --secondmate: refuses before secondmate-home mutation"

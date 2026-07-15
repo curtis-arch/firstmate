@@ -108,9 +108,44 @@ Teardown:
 - After the existing firstmate safety checks pass, teardown closes the recorded Orca terminal and releases the recorded worktree through `orca worktree rm --worktree id:<orca_worktree_id> --force`.
 - Teardown does not raw-delete Orca worktrees.
 
+## Shared-worktree teams
+
+The team foundation lets one Orca task own more than one agent pane in its single Orca-managed worktree, as an explicit contract - never an implicit inference.
+
+Shape: the task's coordinator terminal is unchanged and stays firstmate's only direct report for the task (`terminal=` / `orca_pane_key=`, steered by `fm-send.sh <id>`, supervised by the watcher exactly as before).
+Teammates are additional Orca terminals created in the same task worktree by `bin/fm-team.sh add`, recorded as plural durable identities in the task's meta:
+
+```text
+team_edit_policy=coordinator-only
+orca_team_pane_keys=<tabId>:<leafId> [<tabId>:<leafId>...]
+orca_team_terminals=<handle> [<handle>...]
+```
+
+`orca_team_pane_keys=` is the authoritative record (pane keys are remint-stable); `orca_team_terminals=` is a same-order handle cache that is never trusted across restarts.
+Both team fields and the edit policy are identity-bearing (`fm_meta_identity`), so resumable teardown detects concurrent team changes.
+The existing isolated ship/scout worktree assertion is untouched: teammates never get their own worktree, and a non-team task's lifecycle is byte-for-byte the pre-team behavior (absent team fields mean no team code runs).
+
+Concurrent-edit policy: firstmate does not pretend multiple writers in one worktree are safe.
+`coordinator-only` is the only supported policy: the coordinator owns every file edit, git stage, and commit; teammate panes are advisory (review, tests, investigation) and report findings as text.
+Enforcement points are the ones firstmate actually controls: `fm-team.sh add --command ... --brief-file ...` prepends the contract to the teammate brief at launch, and teardown's existing dirty/unlanded checks on the single task worktree remain the backstop for violations.
+
+Lifecycle, all fail-closed on ambiguity:
+
+- `fm-team.sh add <id>` refuses unless the task meta is active (no teardown claim), records `backend=orca` with an `orca_worktree_id`, and is not a secondmate.
+  It requires the verified creation shape (`result.terminal.handle` plus a valid `result.terminal.paneKey`, observed on Orca 1.4.141); a creation without a durable pane key is closed and refused rather than recorded unaddressably.
+  Recording is CAS under the meta lock against the task generation and the previously read pane-key list.
+- `fm-team.sh status <id>` reports the coordinator through the accepted E1b snapshot, and each teammate as a per-pane inventory fact: `working`/`done` (exact pane-key join into the exact worktree's `worktree ps` agents), `no-agent` (pane connected and writable, pane key absent from a well-formed agents inventory), `gone` (clean enumeration found no terminal with that pane key), or `unknown` (anything ambiguous).
+  Resolution goes through worktree-scoped `terminal list` joined by `terminal show`, because list results expose non-joinable `pty:` placeholder tab/leaf ids.
+- Restart recovery is inherent: handles are re-resolved from pane keys on demand; zero/duplicate/unreadable candidates fail closed exactly like coordinator stale-handle recovery.
+- `fm-team.sh close <id> <pane-key>` closes the resolved pane, re-verifies it is gone, and only then removes the record; an unresolved pane keeps its durable record.
+- Teardown enumerates and closes every recorded teammate pane before `orca worktree rm`, strictly after all landing/dirty-work safety checks.
+  A pane that cannot be proven gone refuses teardown and preserves metadata; `--force` (the captain's explicit discard path) downgrades that refusal to a warning.
+
+The coordinator's accepted E1b liveness contract is unchanged: coordinator `dead` still requires the exact worktree's `agents[]` to be empty, which means a coordinator whose agent exited while teammates are still working reads `unknown`, not `dead` - honest, conservative, and documented rather than guessed.
+
 ## Limitations
 
-- `--secondmate` spawns still refuse `backend=orca`; secondmate-home semantics need a separate design.
+- `--secondmate` spawns refuse `backend=orca` as a precise design boundary: a secondmate home is a persistent seeded directory that already exists, and Orca 1.4.x exposes no CLI primitive to adopt an existing directory as an Orca-managed worktree (`orca worktree create` always creates a fresh checkout from a registered repo; `orca terminal create --worktree` only targets Orca-managed worktrees), so an Orca secondmate would lose home/lifecycle parity. The refusal is pinned by a test and stands until Orca ships adoption.
 - Escape is unsupported because the current Orca terminal send primitive exposes Enter and interrupt-style input but no verified Escape operation.
 - Orca is explicit-only and is not selected by runtime auto-detection.
 - Orca currently exposes no stable CLI version or protocol marker. Unlike the herdr/zellij/cmux docs, this backend intentionally gates spawn support on runtime reachability from `orca status --json` rather than a version floor.
@@ -277,6 +312,7 @@ Run the focused suite with:
 
 ```sh
 tests/fm-backend-orca.test.sh
+tests/fm-team-orca.test.sh
 tests/fm-backend.test.sh
 tests/fm-bootstrap.test.sh
 ```
