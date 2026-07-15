@@ -22,13 +22,15 @@ It is never auto-detected.
 First run: before spawn mutates any repo or worktree state, firstmate runs `orca status --json` and requires the app to report `reachable=true` and `state="ready"` - start the Orca app and wait for it to finish loading before spawning.
 Spawn fails closed if the runtime is not ready.
 The first spawn against a given project also auto-registers that project's repo in Orca (`orca repo add --path`) if it is not already registered - no manual registration step is needed.
+When raw Orca CLI syntax may be version-sensitive, first feature-detect and read the locally bundled guide with `orca skills get orca-cli`.
+Use that version-matched guidance when available, but do not require a separate CLI version marker; Firstmate's production gate remains capability and runtime-readiness based.
 
 Watching and attaching: Orca owns both the worktree and the terminal for its tasks, so there is nothing to attach to outside the Orca app itself - open the app and find the terminal for the task (recorded as `terminal=<handle>` plus durable `orca_pane_key=<tabId>:<leafId>` in the task's meta, with `window=fm-<id>` as the shared firstmate alias).
 You do not need to open the app for routine supervision: from an active firstmate session, `bin/fm-peek.sh <id>` reads a task's terminal without opening Orca, and `FM_HOME=<this-firstmate-home> bin/fm-send.sh <id> "<text>"` steers it unless `FM_HOME` is already set to the active firstmate home (the stable `fm-<id>` alias also works; Enter and Ctrl-C are supported; Escape is not).
 
 Verify it works by spawning a trivial task with `--backend orca` and confirming the task's meta records `backend=orca`, `terminal=`, `orca_pane_key=`, `orca_worktree_id=`, and `worktree=`; the Orca app should show a new terminal for the task.
 
-Limitations: `--secondmate` spawns refuse `backend=orca` (secondmate-home semantics need a separate design), Escape is unsupported, Orca is macOS-only and explicit-only, and it exposes no stable CLI version marker, so spawn gates on runtime reachability instead of a version floor - see "Limitations" below for the complete list.
+Limitations: `--secondmate` spawns refuse `backend=orca` (secondmate-home semantics need a separate design), Escape is unsupported, and Orca is macOS-only and explicit-only; spawn gates on detected capabilities plus runtime reachability instead of a version floor - see "Limitations" below for the complete list.
 
 ## Status
 
@@ -64,6 +66,7 @@ worktree=<absolute path to the Orca-created git worktree>
 `window=` remains the shared firstmate alias used by selector-driven supervision tools after a task selector has resolved through metadata.
 `fm-teardown.sh <id>` uses the same recorded fields after loading `state/<id>.meta`.
 For Orca, `window=` keeps the stable firstmate alias, `terminal=` carries the runtime-epoch handle that backend operations use, and `orca_pane_key=` carries the remint-stable pane identity used to recover that handle.
+The cross-backend `generation=` value is immutable for one task incarnation, while an absent `lifecycle=` means active and `lifecycle=teardown:<owner>` is a temporary destructive-cleanup claim.
 The recorded `backend=orca` field tells shared call sites to route capture, send, interrupt, and close through `bin/backends/orca.sh` instead of tmux assumptions.
 
 ## Lifecycle
@@ -113,7 +116,10 @@ Teardown:
 - `--secondmate` spawns still refuse `backend=orca`; secondmate-home semantics need a separate design.
 - Escape is unsupported because the current Orca terminal send primitive exposes Enter and interrupt-style input but no verified Escape operation.
 - Orca is explicit-only and is not selected by runtime auto-detection.
-- Orca currently exposes no stable CLI version or protocol marker. Unlike the herdr/zellij/cmux docs, this backend intentionally gates spawn support on runtime reachability from `orca status --json` rather than a version floor.
+- Firstmate does not require a stable CLI version or protocol marker.
+  For version-sensitive raw CLI guidance, feature-detect `orca skills get orca-cli` and use its locally bundled, version-matched guide when available; production support gates on capabilities and `orca status --json` readiness rather than a version floor.
+- Orca 1.4.141 can replace a wedged daemon in a way that kills its PTYs without emitting a synthetic exit event.
+  A missing event is not proof of a clean agent exit: unreadable, disconnected, or otherwise unjoinable endpoint state remains `unknown`, and Firstmate must fail closed instead of reporting `dead` or authorizing recovery action from that signal alone.
 - Pane-key durability across an actual observed app restart remains unverified.
   Orca source defines pane keys as persisted remint-stable identities and the recovery path is fail-closed, but the first natural or captain-approved restart still needs the documented post-restart smoke check.
 
