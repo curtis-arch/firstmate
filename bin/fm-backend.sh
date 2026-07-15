@@ -375,7 +375,7 @@ fm_backend_meta_for_window() {  # <target> <state-dir>
 }
 
 fm_backend_orca_meta_for_target() {  # <terminal-handle>
-  local target=$1 meta backend terminal match= count=0
+  local target=$1 meta backend terminal match='' count=0
   for meta in "$FM_BACKEND_STATE_DIR"/*.meta; do
     [ -e "$meta" ] || continue
     backend=$(fm_meta_get "$meta" backend)
