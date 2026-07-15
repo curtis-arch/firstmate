@@ -992,7 +992,9 @@ cleanup_claimed_firstmate_child() {
 
 cleanup_firstmate_home_children() {
   local home=$1 sub_state child_meta child_identity child_claim status=0 i
-  local -a child_metas=() child_claims=()
+  # Bash 3.2 with set -u treats a declared-but-empty array expansion as
+  # unbound, so keep an unused sentinel at index 0 and iterate from index 1.
+  local -a child_metas=('') child_claims=('')
   sub_state="$home/state"
   [ -d "$sub_state" ] || return 0
   for child_meta in "$sub_state"/*.meta; do
@@ -1003,7 +1005,7 @@ cleanup_firstmate_home_children() {
     child_claims+=("$child_claim")
   done
   if [ "$status" -eq 0 ]; then
-    for ((i=0; i<${#child_metas[@]}; i++)); do
+    for ((i=1; i<${#child_metas[@]}; i++)); do
       if cleanup_claimed_firstmate_child "$home" "${child_metas[$i]}" "${child_claims[$i]}"; then
         :
       else
@@ -1082,13 +1084,13 @@ TEARDOWN_IDENTITY=$(fm_meta_claim_teardown "$META" "$META_IDENTITY" "$TEARDOWN_O
 }
 
 if [ "$KIND" = secondmate ] && [ "$FORCE" = "--force" ]; then
+  validate_firstmate_home_children_removal "$HOME_PATH" || exit 1
   [ -z "$T" ] || fm_backend_kill "$BACKEND" "$T" "$(meta_value "$META" zellij_tab_id)" "fm-$ID" 2>/dev/null || true
   if [ -n "$T" ] && fm_backend_target_exists "$BACKEND" "$T" "fm-$ID" 2>/dev/null; then
     echo "error: secondmate endpoint $T remained live; refusing child cleanup" >&2
     exit 1
   fi
   PARENT_ENDPOINT_QUIESCED=1
-  validate_firstmate_home_children_removal "$HOME_PATH" || exit 1
 fi
 
 if [ -d "$WT" ] && [ "$FORCE" != "--force" ]; then
