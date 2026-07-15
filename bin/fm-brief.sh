@@ -29,7 +29,7 @@
 # For ship tasks, the definition of done is shaped by the project's delivery mode
 # (data/projects.md via fm-project-mode.sh; see AGENTS.md project management
 # and task lifecycle):
-#   no-mistakes  implement -> /no-mistakes pipeline -> PR -> captain merge (default)
+#   no-mistakes  lanes self-validate -> one owner integrates -> one steered gate -> PR -> captain merge (default)
 #   direct-PR    implement -> push + open PR via gh-axi (no pipeline) -> captain merge
 #   local-only   implement on branch, stop and report "ready in branch" (no push/PR);
 #                firstmate reviews, captain approves, firstmate merges to local main
@@ -305,17 +305,24 @@ EOF
     RULE1='1. Never push to the default branch. Never merge a PR.'
     DOD=$(cat <<EOF
 # Definition of done
-The task is complete only when committed on your branch.
-When you believe it is complete, append \`done: {summary}\` to the status file and stop.
-Firstmate will then instruct you to run /no-mistakes to validate and ship a PR.
+This task belongs to delivery unit **{DELIVERY_UNIT}**.
+Its single delivery-owner task is **{DELIVERY_OWNER}**.
+Firstmate must replace both placeholders before dispatch and name exactly one delivery owner across the unit.
+
+Every implementation lane self-reviews its scoped diff, runs targeted tests, commits, appends \`done: lane complete; self-review and targeted tests passed\`, and stops.
+Implementation lanes never invoke /no-mistakes independently.
+
+Only the named delivery owner integrates the complete unit, confirms every lane reported self-review and targeted tests, performs an integration self-review and targeted tests, commits, appends \`done: delivery unit integrated; lane validation confirmed\`, and stops.
+The delivery owner invokes /no-mistakes exactly once, only after Firstmate explicitly steers it to run the end-of-delivery gate.
 
 You drive no-mistakes by responding to its gates, not by implementing fixes.
 Follow the guidance no-mistakes itself provides for the mechanics: it loads when you invoke /no-mistakes, and \`no-mistakes axi run --help\` plus the \`help\` lines in each \`axi\` response are authoritative and version-matched to the installed binary.
 Do not hand-edit, commit, or fix findings yourself while a run is active - the pipeline applies every fix.
 
 Two firstmate-specific rules layer on top of that guidance:
-- ask-user findings are not yours to answer: escalate to firstmate (rule 6) and stop.
-  When the decision comes back, feed it to the gate with \`no-mistakes axi respond\` and let the pipeline apply it - do not route the question to "the user" or implement the fix yourself.
+- Every finding decision belongs to Firstmate: escalate it (rule 6) and stop.
+  Firstmate may authorize one contained fix round; if later review finds a new material defect, park and return it to Firstmate instead of starting another fix round.
+  When a decision comes back, feed it to the gate with \`no-mistakes axi respond\` and let the pipeline apply it - do not route the question to "the user" or implement the fix yourself.
 - Avoid \`--yes\`: the captain, not you, owns the ask-user decisions it would silently auto-resolve.
 
 After /no-mistakes reports CI green (the CI-ready return point - do not wait for it to keep monitoring in the background until merge), append \`done: PR {url} checks green\` and stop. You are finished.
