@@ -454,11 +454,11 @@ if (worktrees[0].agents.length === 0) {
 const agents = worktrees[0].agents.filter((agent) => agent && agent.paneKey === paneKey);
 if (agents.length !== 1) process.exit(1);
 const state = agents[0].state;
-if (!["working", "done", "waiting", "blocked"].includes(state)) process.exit(1);
+if (!["working", "done"].includes(state)) process.exit(1);
 process.stdout.write(state);
 ' "$worktree_id" "$pane_key" 2>/dev/null) || { printf 'unknown'; return 0; }
   case "$snapshot" in
-    working|done|waiting|blocked|no-agent) printf '%s' "$snapshot" ;;
+    working|done|no-agent) printf '%s' "$snapshot" ;;
     *) printf 'unknown' ;;
   esac
 }
@@ -467,15 +467,12 @@ fm_backend_orca_busy_state() {  # <terminal-id> <recorded-worktree-id> [meta-pat
   case "$(fm_backend_orca_agent_snapshot "$@")" in
     working) printf 'busy' ;;
     done) printf 'idle' ;;
-    waiting|blocked) printf 'attention' ;;
     *) printf 'unknown' ;;
   esac
 }
 
 fm_backend_orca_attention_state() {  # <terminal-id> <recorded-worktree-id> [meta-path]
   case "$(fm_backend_orca_agent_snapshot "$@")" in
-    waiting) printf 'waiting' ;;
-    blocked) printf 'blocked' ;;
     working|done|no-agent) printf 'none' ;;
     *) printf 'unknown' ;;
   esac
@@ -483,7 +480,7 @@ fm_backend_orca_attention_state() {  # <terminal-id> <recorded-worktree-id> [met
 
 fm_backend_orca_agent_alive() {  # <terminal-id> <recorded-worktree-id> [meta-path]
   case "$(fm_backend_orca_agent_snapshot "$@")" in
-    working|done|waiting|blocked) printf 'alive' ;;
+    working|done) printf 'alive' ;;
     no-agent) printf 'dead' ;;
     *) printf 'unknown' ;;
   esac

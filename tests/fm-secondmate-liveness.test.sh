@@ -235,7 +235,8 @@ case "${1:-}" in
     exit 0 ;;
   kill-window)
     printf '%s\n' "$*" >> "${FM_TMUX_CALL_LOG:?}"
-    if [ -z "${FM_TEST_KILL_STICKS:-}" ] || [ ! -f "${FM_TEST_SEND_FAILED_MARKER:-/dev/null}" ]; then
+    if [ -z "${FM_TEST_KILL_STICKS_ALWAYS:-}" ] \
+      && { [ -z "${FM_TEST_KILL_STICKS:-}" ] || [ ! -f "${FM_TEST_SEND_FAILED_MARKER:-/dev/null}" ]; }; then
       [ -z "${FM_TMUX_ENDPOINT_STATE:-}" ] || : > "$FM_TMUX_ENDPOINT_STATE"
     fi
     exit 0 ;;
@@ -245,7 +246,10 @@ case "${1:-}" in
       exit 1
     fi
     exit 0 ;;
-  list-windows|has-session) exit 0 ;;
+  list-windows)
+    [ -z "${FM_TEST_LIST_WINDOWS_FAIL:-}" ] || exit 1
+    exit 0 ;;
+  has-session) exit 0 ;;
 esac
 exit 0
 SH
@@ -295,6 +299,7 @@ run_bootstrap() {  # <fakebin> <home> <pane-cmd> <call-log> [extra env...] -> st
   local fb=$1 home=$2 cmd=$3 log=$4; shift 4
   PATH="$fb:$BASE_PATH" TMUX='' FM_BACKEND=tmux FM_HOME="$home" \
     FM_TEST_PANE_CMD="$cmd" FM_TMUX_CALL_LOG="$log" \
+    FM_TMUX_ENDPOINT_STATE="$log.endpoint" \
     env "$@" "$ROOT/bin/fm-bootstrap.sh" 2>&1
 }
 
@@ -435,6 +440,108 @@ test_replacement_failed_close_preserves_claimed_metadata() {
   pass "spawn: unverified endpoint closure preserves inactive replacement ownership"
 }
 
+test_replacement_refuses_before_creation_when_old_endpoint_remains() {
+  local w fb tmuxfb log out status id endpoint_state meta
+  id="smoldlive$$"
+  w=$(new_world replacement-old-live)
+  add_sm_home "$w" "$id" "firstmate:fm-$id"
+  fb=$(make_toolchain "$w"); tmuxfb=$(make_liveness_tmux "$w")
+  log="$w/calls.log"; : > "$log"
+  endpoint_state="$w/endpoint-gone"
+  meta="$w/home/state/$id.meta"
+
+  set +e
+  out=$(PATH="$tmuxfb:$fb:$BASE_PATH" TMUX='' FM_BACKEND=tmux FM_HOME="$w/home" \
+    FM_TEST_PANE_CMD=zsh FM_TMUX_CALL_LOG="$log" FM_SPAWN_NO_GUARD=1 \
+    FM_TMUX_ENDPOINT_STATE="$endpoint_state" FM_TEST_KILL_STICKS_ALWAYS=1 \
+    FM_SPAWN_REPLACE_GENERATION="initial-$id" \
+    "$ROOT/bin/fm-spawn.sh" "$id" --secondmate 2>&1)
+  status=$?
+  set -e
+
+  [ "$status" -ne 0 ] || fail "replacement should refuse while the old endpoint remains live"
+  assert_contains "$out" "closure is present" "replacement did not report the live old endpoint"
+  assert_not_contains "$(cat "$log")" "new-window" "replacement created a new endpoint before proving the old one absent"
+  assert_grep 'lifecycle=replacement:' "$meta" "failed old-endpoint close did not preserve replacement ownership"
+  pass "spawn: live old endpoint blocks replacement creation and preserves ownership"
+}
+
+test_replacement_refuses_before_creation_when_old_close_is_unknown() {
+  local w fb tmuxfb log out status id endpoint_state meta
+  id="smoldunknown$$"
+  w=$(new_world replacement-old-unknown)
+  add_sm_home "$w" "$id" "firstmate:fm-$id"
+  fb=$(make_toolchain "$w"); tmuxfb=$(make_liveness_tmux "$w")
+  log="$w/calls.log"; : > "$log"
+  endpoint_state="$w/endpoint-gone"
+  meta="$w/home/state/$id.meta"
+
+  set +e
+  out=$(PATH="$tmuxfb:$fb:$BASE_PATH" TMUX='' FM_BACKEND=tmux FM_HOME="$w/home" \
+    FM_TEST_PANE_CMD=zsh FM_TMUX_CALL_LOG="$log" FM_SPAWN_NO_GUARD=1 \
+    FM_TMUX_ENDPOINT_STATE="$endpoint_state" FM_TEST_LIST_WINDOWS_FAIL=1 \
+    FM_SPAWN_REPLACE_GENERATION="initial-$id" \
+    "$ROOT/bin/fm-spawn.sh" "$id" --secondmate 2>&1)
+  status=$?
+  set -e
+
+  [ "$status" -ne 0 ] || fail "replacement should refuse when old-endpoint absence is unprovable"
+  assert_contains "$out" "closure is unknown" "replacement did not report inconclusive old-endpoint closure"
+  assert_not_contains "$(cat "$log")" "new-window" "replacement created a new endpoint after an inconclusive close"
+  assert_grep 'lifecycle=replacement:' "$meta" "inconclusive old-endpoint close did not preserve replacement ownership"
+  pass "spawn: inconclusive old-endpoint close blocks creation and preserves ownership"
+}
+
+test_normal_teardown_preserves_secondmate_when_endpoint_close_fails() {
+  local w fb tmuxfb log out status id endpoint_state home meta
+  id="smteardownlive$$"
+  w=$(new_world teardown-old-live)
+  add_sm_home "$w" "$id" "firstmate:fm-$id"
+  fb=$(make_toolchain "$w"); tmuxfb=$(make_liveness_tmux "$w")
+  log="$w/calls.log"; : > "$log"
+  endpoint_state="$w/endpoint-gone"
+  home="$w/$id"
+  meta="$w/home/state/$id.meta"
+
+  set +e
+  out=$(PATH="$tmuxfb:$fb:$BASE_PATH" TMUX='' FM_BACKEND=tmux FM_HOME="$w/home" \
+    FM_TEST_PANE_CMD=zsh FM_TMUX_CALL_LOG="$log" FM_TMUX_ENDPOINT_STATE="$endpoint_state" \
+    FM_TEST_KILL_STICKS_ALWAYS=1 "$ROOT/bin/fm-teardown.sh" "$id" 2>&1)
+  status=$?
+  set -e
+
+  [ "$status" -ne 0 ] || fail "normal teardown should fail while the secondmate endpoint remains live"
+  assert_contains "$out" "closure is present" "normal teardown did not report the live endpoint"
+  assert_present "$home" "normal teardown removed the secondmate home after failed endpoint close"
+  assert_grep 'lifecycle=teardown:' "$meta" "normal teardown released ownership after endpoint mutation"
+  pass "teardown: live secondmate endpoint preserves home and claimed metadata"
+}
+
+test_normal_teardown_preserves_secondmate_when_close_is_unknown() {
+  local w fb tmuxfb log out status id endpoint_state home meta
+  id="smteardownunknown$$"
+  w=$(new_world teardown-old-unknown)
+  add_sm_home "$w" "$id" "firstmate:fm-$id"
+  fb=$(make_toolchain "$w"); tmuxfb=$(make_liveness_tmux "$w")
+  log="$w/calls.log"; : > "$log"
+  endpoint_state="$w/endpoint-gone"
+  home="$w/$id"
+  meta="$w/home/state/$id.meta"
+
+  set +e
+  out=$(PATH="$tmuxfb:$fb:$BASE_PATH" TMUX='' FM_BACKEND=tmux FM_HOME="$w/home" \
+    FM_TEST_PANE_CMD=zsh FM_TMUX_CALL_LOG="$log" FM_TMUX_ENDPOINT_STATE="$endpoint_state" \
+    FM_TEST_LIST_WINDOWS_FAIL=1 "$ROOT/bin/fm-teardown.sh" "$id" 2>&1)
+  status=$?
+  set -e
+
+  [ "$status" -ne 0 ] || fail "normal teardown should fail when endpoint absence is unprovable"
+  assert_contains "$out" "closure is unknown" "normal teardown did not report inconclusive endpoint closure"
+  assert_present "$home" "normal teardown removed the secondmate home after inconclusive endpoint close"
+  assert_grep 'lifecycle=teardown:' "$meta" "normal teardown released ownership after inconclusive close"
+  pass "teardown: inconclusive secondmate close preserves home and claimed metadata"
+}
+
 test_sweep_leaves_alive_secondmate_untouched() {
   local w fb tmuxfb log out
   w=$(new_world sweep-alive)
@@ -548,6 +655,10 @@ test_direct_duplicate_secondmate_refuses_before_mutation
 test_replacement_failure_cleans_new_endpoint_and_stale_metadata
 test_replacement_launch_failure_rolls_back_published_metadata
 test_replacement_failed_close_preserves_claimed_metadata
+test_replacement_refuses_before_creation_when_old_endpoint_remains
+test_replacement_refuses_before_creation_when_old_close_is_unknown
+test_normal_teardown_preserves_secondmate_when_endpoint_close_fails
+test_normal_teardown_preserves_secondmate_when_close_is_unknown
 test_sweep_leaves_alive_secondmate_untouched
 test_sweep_never_acts_on_inconclusive_reading
 test_sweep_never_acts_on_unverified_harness_dead_reading
