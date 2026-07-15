@@ -1012,7 +1012,7 @@ cleanup_firstmate_home_children() {
   done
   if [ "$status" -eq 0 ]; then
     for ((i=1; i<${#child_metas[@]}; i++)); do
-      child_mutated[$i]=1
+      child_mutated[i]=1
       if cleanup_claimed_firstmate_child "$home" "${child_metas[$i]}" "${child_claims[$i]}"; then
         :
       else
