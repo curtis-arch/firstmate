@@ -119,7 +119,22 @@ case "${1:-}" in
 esac
 exit 0
 SH
-  chmod +x "$fb/no-mistakes" "$fb/tmux" "$fb/herdr"
+  cat > "$fb/orca" <<'SH'
+#!/usr/bin/env bash
+set -u
+case "$1 $2" in
+  "terminal read")
+    printf '%s\n' '{"ok":true,"result":{"terminal":{"tail":["idle prompt"]}}}'
+    ;;
+  "terminal show")
+    printf '%s\n' '{"ok":true,"result":{"terminal":{"worktreeId":"repo::/scratch","tabId":"11111111-1111-4111-8111-111111111111","leafId":"22222222-2222-4222-8222-222222222222","connected":true,"writable":true}}}'
+    ;;
+  "worktree ps")
+    printf '{"ok":true,"result":{"worktrees":[{"worktreeId":"repo::/scratch","agents":[{"paneKey":"11111111-1111-4111-8111-111111111111:22222222-2222-4222-8222-222222222222","state":"%s"}]}]}}\n' "${FM_FAKE_ORCA_AGENT_STATE:-done}"
+    ;;
+esac
+SH
+  chmod +x "$fb/no-mistakes" "$fb/tmux" "$fb/herdr" "$fb/orca"
   printf '%s\n' "$fb"
 }
 
@@ -159,8 +174,10 @@ reset_fakes() {
   FM_FAKE_HERDR_MISSING=0
   FM_FAKE_HERDR_AGENT_STATUS=""
   FM_FAKE_CI_LOGS=""
+  FM_FAKE_ORCA_AGENT_STATE="done"
   export FM_FAKE_AXI_STATUS FM_FAKE_AXI_STATUS_RUN FM_FAKE_RUNS_LIST FM_FAKE_BUSY FM_FAKE_TMUX_MISSING
   export FM_FAKE_HERDR_BUSY FM_FAKE_HERDR_MISSING FM_FAKE_HERDR_AGENT_STATUS FM_FAKE_CI_LOGS
+  export FM_FAKE_ORCA_AGENT_STATE
 }
 
 # --- run-object fixtures (TOON, as `no-mistakes axi status` emits) -----------
@@ -1126,6 +1143,25 @@ EOF
   pass "crew_is_provably_working still surfaces a genuinely stopped crew (safety property preserved)"
 }
 
+test_orca_attention_reports_actionable_backend_state() {
+  reset_fakes
+  local d out state
+  d=$(new_case orca-attention)
+  mkdir -p "$d/wt"
+  make_fakebin "$d" >/dev/null
+  fm_write_meta "$d/state/orca-attn.meta" "window=fm-orca-attn" "terminal=term-orca-attn" \
+    "backend=orca" "orca_worktree_id=repo::/scratch" "worktree=$d/wt" "kind=scout"
+  for state in waiting blocked; do
+    FM_FAKE_ORCA_AGENT_STATE=$state
+    out=$(run_crew_state "$d" orca-attn)
+    assert_contains "$out" "state: blocked" "Orca $state was not actionable"
+    assert_contains "$out" "source: backend-agent" "Orca $state did not preserve its native source"
+    assert_contains "$out" "Orca agent $state" "Orca $state detail was lost"
+    assert_not_contains "$out" "state: unknown" "Orca $state fell through to idle/unknown"
+  done
+  pass "Orca waiting and blocked report an actionable backend-agent state"
+}
+
 # Usage error (no id) is the one non-zero exit.
 test_usage_error() {
   reset_fakes
@@ -1177,6 +1213,7 @@ test_torn_down_worktree
 test_missing_meta
 test_provably_working_via_runs_list_fallback
 test_not_provably_working_when_stopped
+test_orca_attention_reports_actionable_backend_state
 test_usage_error
 
 echo "all fm-crew-state tests passed"

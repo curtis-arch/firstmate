@@ -629,7 +629,7 @@ fm_backend_worktree_path() {  # <backend> <worktree-id>
   esac
 }
 
-# fm_backend_busy_state: semantic busy/idle/unknown for backends that expose
+# fm_backend_busy_state: semantic busy/idle/attention/unknown for backends that expose
 # native agent-state. Orca additionally requires the recorded worktree id as
 # its third argument so its runtime-global inventory stays scoped to the task.
 # Backends with no such primitive (tmux) report unknown. Callers own the fallback policy: fm-watch.sh
@@ -645,6 +645,23 @@ fm_backend_busy_state() {  # <backend> <target> [recorded-worktree-id]
     orca)
       meta=$(fm_backend_orca_meta_for_target "$1" 2>/dev/null || true)
       fm_backend_orca_busy_state "$@" "$meta"
+      ;;
+    *) printf 'unknown' ;;
+  esac
+}
+
+# fm_backend_attention_state: backend-neutral detail for a conclusive
+# `attention` busy-state verdict. Prints waiting|blocked|none|unknown. Only Orca
+# currently exposes this evidence; every other backend remains unchanged and
+# reports unknown.
+fm_backend_attention_state() {  # <backend> <target> [recorded-worktree-id]
+  local backend=$1 meta
+  shift
+  fm_backend_source "$backend" || { printf 'unknown'; return 0; }
+  case "$backend" in
+    orca)
+      meta=$(fm_backend_orca_meta_for_target "$1" 2>/dev/null || true)
+      fm_backend_orca_attention_state "$@" "$meta"
       ;;
     *) printf 'unknown' ;;
   esac
@@ -736,7 +753,8 @@ fm_backend_target_exists() {  # <backend> <target> [expected-label]
 # "alive" because the pane itself still exists, which is exactly the gap
 # bin/fm-bootstrap.sh's session-start secondmate-liveness sweep exists to
 # close (AGENTS.md "Session start"). Prints one of:
-#   alive   - a real agent process is confirmed running.
+#   alive   - a real agent process is confirmed running, including an agent
+#             waiting or blocked on attention.
 #   dead    - CONFIDENTLY not an agent: a bare shell (tmux) or a
 #             structurally-gone/no-agent-registered pane (herdr).
 #   unknown - anything ambiguous, unreadable, or unverified for this backend.
