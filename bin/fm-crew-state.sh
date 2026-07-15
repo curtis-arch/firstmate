@@ -571,17 +571,6 @@ fi
 [ -n "$BACKEND_TARGET" ] || emit unknown none "no backend target recorded"
 pane_readable "$BACKEND_TARGET" || emit unknown none "backend target gone: $BACKEND_TARGET"
 
-# A native attention state is stronger than idle-pane/status-log fallback but
-# does not override an authoritative run-step above. Preserve the backend's
-# waiting-vs-blocked detail while using the existing actionable blocked state.
-if [ "$TASK_BACKEND" = orca ]; then
-  worktree_id=$(fm_meta_get "$META" orca_worktree_id)
-  ATTENTION_STATE=$(fm_backend_attention_state orca "$BACKEND_TARGET" "$worktree_id" 2>/dev/null)
-  case "$ATTENTION_STATE" in
-    waiting|blocked) emit blocked backend-agent "Orca agent $ATTENTION_STATE" ;;
-  esac
-fi
-
 # Secondmates idle on their own watcher (idle pane = healthy), so the busy
 # signature is not meaningful for them; read their state from the status log only.
 if [ "$KIND" != secondmate ] && crew_pane_is_busy "$BACKEND_TARGET"; then

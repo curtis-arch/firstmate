@@ -663,22 +663,6 @@ fm_backend_busy_state() {  # <backend> <target> [recorded-worktree-id]
   esac
 }
 
-# fm_backend_attention_state: reserved backend-neutral detail for a conclusive
-# attention verdict. Prints waiting|blocked|none|unknown. Orca returns none for
-# observed non-attention states and unknown for unobserved states.
-fm_backend_attention_state() {  # <backend> <target> [recorded-worktree-id]
-  local backend=$1 meta
-  shift
-  fm_backend_source "$backend" || { printf 'unknown'; return 0; }
-  case "$backend" in
-    orca)
-      meta=$(fm_backend_orca_meta_for_target "$1" 2>/dev/null || true)
-      fm_backend_orca_attention_state "$@" "$meta"
-      ;;
-    *) printf 'unknown' ;;
-  esac
-}
-
 # fm_backend_composer_state: classify the composer/input row of <target> as
 # empty|pending|unknown for callers that need a pre-submit pending-input guard
 # or an adapter's conservative submit fallback. It is exposed generically so a
