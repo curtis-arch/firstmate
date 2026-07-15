@@ -204,6 +204,11 @@ ORCA_PANE_KEY=
 SPAWN_META=
 SPAWN_META_LOCKED=0
 SPAWN_GENERATION=
+SPAWN_REPLACEMENT_ACTIVE=0
+SPAWN_REPLACEMENT_LIFECYCLE=
+SPAWN_ABORT_BACKEND=
+SPAWN_ABORT_TARGET=
+SPAWN_ABORT_TARGET_CLEANUP=0
 
 parse_orca_worktree_result() {
   local raw=$1 rest terminal_rest
@@ -231,7 +236,11 @@ parse_orca_worktree_result() {
 }
 
 orca_spawn_abort_cleanup() {
-  local status=$? meta_tmp
+  local status=$? meta_tmp current_lifecycle
+  if [ "$SPAWN_ABORT_TARGET_CLEANUP" = 1 ]; then
+    SPAWN_ABORT_TARGET_CLEANUP=0
+    fm_backend_kill "$SPAWN_ABORT_BACKEND" "$SPAWN_ABORT_TARGET" 2>/dev/null || true
+  fi
   if [ "$ORCA_ABORT_CLEANUP" = 1 ]; then
     ORCA_ABORT_CLEANUP=0
     if [ -n "${ORCA_TERMINAL:-}" ]; then
@@ -269,6 +278,13 @@ orca_spawn_abort_cleanup() {
       fi
     fi
   fi
+  if [ "$SPAWN_REPLACEMENT_ACTIVE" = 1 ]; then
+    current_lifecycle=$(fm_meta_value_unlocked "$SPAWN_META" lifecycle 2>/dev/null || true)
+    if [ "$current_lifecycle" = "$SPAWN_REPLACEMENT_LIFECYCLE" ]; then
+      rm -f "$SPAWN_META"
+    fi
+    SPAWN_REPLACEMENT_ACTIVE=0
+  fi
   if [ "$SPAWN_META_LOCKED" = 1 ]; then
     fm_meta_lock_release "$SPAWN_META"
     SPAWN_META_LOCKED=0
@@ -276,6 +292,27 @@ orca_spawn_abort_cleanup() {
   return "$status"
 }
 trap orca_spawn_abort_cleanup EXIT
+
+spawn_mark_replacement() {  # <meta-path>
+  local meta=$1 tmp
+  SPAWN_REPLACEMENT_LIFECYCLE="replacement:$SPAWN_GENERATION"
+  tmp=$(mktemp "$STATE/.${ID}.replace.XXXXXX") || return 1
+  if ! grep -v '^lifecycle=' "$meta" > "$tmp" \
+    || ! printf 'lifecycle=%s\n' "$SPAWN_REPLACEMENT_LIFECYCLE" >> "$tmp" \
+    || ! mv "$tmp" "$meta"; then
+    rm -f "$tmp"
+    return 1
+  fi
+  SPAWN_REPLACEMENT_ACTIVE=1
+}
+
+spawn_track_replacement_target() {  # <backend> <target>
+  [ "$SPAWN_REPLACEMENT_ACTIVE" = 1 ] || return 0
+  [ -n "$2" ] || return 0
+  SPAWN_ABORT_BACKEND=$1
+  SPAWN_ABORT_TARGET=$2
+  SPAWN_ABORT_TARGET_CLEANUP=1
+}
 
 # Batch dispatch (see header): when the first positional is an `id=repo` pair, treat every
 # positional as one and spawn each by re-execing this script in single-task mode. We use
@@ -650,11 +687,6 @@ if [ "$KIND" = secondmate ]; then
     echo "error: task metadata already exists for $ID at $SPAWN_META" >&2
     exit 1
   fi
-  if [ -e "$SPAWN_META" ]; then
-    replaced_backend=$(fm_backend_of_meta "$SPAWN_META")
-    replaced_target=$(fm_backend_target_of_meta "$SPAWN_META")
-    [ -z "$replaced_target" ] || fm_backend_kill "$replaced_backend" "$replaced_target" 2>/dev/null || true
-  fi
   SPAWN_GENERATION=$(fm_meta_new_generation) || exit 1
   # Local-HEAD sync: before launch, fast-forward this secondmate's worktree to the
   # PRIMARY checkout's current default-branch commit, so a freshly spawned or
@@ -714,6 +746,16 @@ fi
 # (docs/herdr-backend.md "Known gaps").
 PROJ_ABS_REAL=$(cd "$PROJ_ABS" 2>/dev/null && pwd -P) || PROJ_ABS_REAL="$PROJ_ABS"
 
+if [ "$KIND" = secondmate ] && [ -n "${FM_SPAWN_REPLACE_GENERATION:-}" ]; then
+  replaced_backend=$(fm_backend_of_meta "$SPAWN_META")
+  replaced_target=$(fm_backend_target_of_meta "$SPAWN_META")
+  spawn_mark_replacement "$SPAWN_META" || {
+    echo "error: could not reserve secondmate replacement for $ID" >&2
+    exit 1
+  }
+  [ -z "$replaced_target" ] || fm_backend_kill "$replaced_backend" "$replaced_target" 2>/dev/null || true
+fi
+
 real_path_or_raw() {  # <path>
   local path=$1 real
   if real=$(cd "$path" 2>/dev/null && pwd -P); then
@@ -762,6 +804,7 @@ case "$BACKEND" in
     # stays $T (the name form), which is safe now that rename is disabled.
     WID=$(fm_backend_tmux_create_task "$SES" "$W" "$PROJ_ABS") || exit 1
     WT_TARGET="$WID"
+    spawn_track_replacement_target tmux "$T"
     ;;
   herdr)
     # fm_backend_herdr_workspace_label resolves the target workspace from
@@ -794,11 +837,14 @@ case "$BACKEND" in
     read -r HERDR_TAB_ID HERDR_PANE_ID <<EOF
 $HERDR_TASK_IDS
 EOF
+    if [ -n "$HERDR_PANE_ID" ]; then
+      T="$HERDR_SES:$HERDR_PANE_ID"
+      spawn_track_replacement_target herdr "$T"
+    fi
     if [ -z "$HERDR_TAB_ID" ] || [ -z "$HERDR_PANE_ID" ]; then
       echo "error: herdr did not return a tab/pane id for $W" >&2
       exit 1
     fi
-    T="$HERDR_SES:$HERDR_PANE_ID"
     ;;
   zellij)
     ZELLIJ_SES=$(fm_backend_zellij_container_ensure) || exit 1
@@ -806,11 +852,14 @@ EOF
     read -r ZELLIJ_TAB_ID ZELLIJ_PANE_ID <<EOF
 $ZELLIJ_TASK_IDS
 EOF
+    if [ -n "$ZELLIJ_PANE_ID" ]; then
+      T="$ZELLIJ_SES:$ZELLIJ_PANE_ID"
+      spawn_track_replacement_target zellij "$T"
+    fi
     if [ -z "$ZELLIJ_TAB_ID" ] || [ -z "$ZELLIJ_PANE_ID" ]; then
       echo "error: zellij did not return a tab/pane id for $W" >&2
       exit 1
     fi
-    T="$ZELLIJ_SES:$ZELLIJ_PANE_ID"
     ;;
   cmux)
     fm_backend_cmux_container_ensure || exit 1
@@ -818,11 +867,14 @@ EOF
     read -r CMUX_WORKSPACE_ID CMUX_SURFACE_ID <<EOF
 $CMUX_TASK_IDS
 EOF
+    if [ -n "$CMUX_WORKSPACE_ID" ] && [ -n "$CMUX_SURFACE_ID" ]; then
+      T="$CMUX_WORKSPACE_ID:$CMUX_SURFACE_ID"
+      spawn_track_replacement_target cmux "$T"
+    fi
     if [ -z "$CMUX_WORKSPACE_ID" ] || [ -z "$CMUX_SURFACE_ID" ]; then
       echo "error: cmux did not return a workspace/surface id for $W" >&2
       exit 1
     fi
-    T="$CMUX_WORKSPACE_ID:$CMUX_SURFACE_ID"
     ;;
   orca)
     set +e
@@ -1103,7 +1155,8 @@ META_TMP=$(mktemp "$STATE/.${ID}.meta.XXXXXX")
 if [ "$KIND" = secondmate ] && [ -n "${FM_SPAWN_REPLACE_GENERATION:-}" ]; then
   current_generation=$(fm_meta_value_unlocked "$SPAWN_META" generation 2>/dev/null || true)
   current_kind=$(fm_meta_value_unlocked "$SPAWN_META" kind 2>/dev/null || true)
-  if [ "$current_generation" != "$FM_SPAWN_REPLACE_GENERATION" ] || [ "$current_kind" != secondmate ] || ! fm_meta_is_active_unlocked "$SPAWN_META"; then
+  current_lifecycle=$(fm_meta_value_unlocked "$SPAWN_META" lifecycle 2>/dev/null || true)
+  if [ "$current_generation" != "$FM_SPAWN_REPLACE_GENERATION" ] || [ "$current_kind" != secondmate ] || [ "$current_lifecycle" != "$SPAWN_REPLACEMENT_LIFECYCLE" ]; then
     rm -f "$META_TMP"
     echo "error: task metadata changed during secondmate recovery for $ID" >&2
     exit 1
@@ -1118,6 +1171,8 @@ if ! mv "$META_TMP" "$SPAWN_META"; then
   echo "error: could not record task metadata for $ID at $SPAWN_META" >&2
   exit 1
 fi
+SPAWN_ABORT_TARGET_CLEANUP=0
+SPAWN_REPLACEMENT_ACTIVE=0
 fm_meta_lock_release "$SPAWN_META"
 SPAWN_META_LOCKED=0
 [ "$BACKEND" = orca ] && ORCA_ABORT_CLEANUP=0

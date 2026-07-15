@@ -56,7 +56,7 @@ fm_meta_new_generation() {
 
 fm_meta_process_stamp() {  # <pid>
   local stamp
-  stamp=$(ps -p "$1" -o lstart= 2>/dev/null | tr -cd '[:alnum:]') || return 1
+  stamp=$(LC_ALL=C ps -p "$1" -o lstart= 2>/dev/null | tr -cd '[:alnum:]') || return 1
   [ -n "$stamp" ] || return 1
   printf '%s' "$stamp"
 }
