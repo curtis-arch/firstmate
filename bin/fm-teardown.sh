@@ -187,96 +187,10 @@ require_orca_terminal() {
   printf '%s\n' "$terminal"
 }
 
-require_orca_team_metadata() {
-  local meta=$1 shape coordinator coordinator_pane terminal entry child_terminal child_pane seen
-  shape=$(meta_value "$meta" orca_task_shape)
-  case "$shape" in
-    '') return 0 ;;
-    team) ;;
-    *)
-      echo "REFUSED: unsupported Orca task shape '$shape' in $meta; preserving metadata." >&2
-      return 1
-      ;;
-  esac
-  if [ "$KIND" = secondmate ]; then
-    echo "REFUSED: Orca team tasks cannot be nested under kind=secondmate; preserving metadata." >&2
-    return 1
-  fi
-  coordinator=$(meta_value "$meta" orca_coordinator_terminal)
-  coordinator_pane=$(meta_value "$meta" orca_coordinator_pane_id)
-  terminal=$(meta_value "$meta" terminal)
-  if [ -z "$coordinator" ] || [ -z "$coordinator_pane" ]; then
-    echo "REFUSED: Orca team metadata requires one coordinator terminal and pane identity; preserving metadata." >&2
-    return 1
-  fi
-  if [ "$terminal" != "$coordinator" ]; then
-    echo "REFUSED: Orca team coordinator terminal does not match terminal= in $meta; preserving metadata." >&2
-    return 1
-  fi
-  seen="|$coordinator|$coordinator_pane|"
-  while IFS= read -r entry; do
-    [ -n "$entry" ] || continue
-    case "$entry" in
-      *'|'*) ;;
-      *)
-        echo "REFUSED: malformed orca_owned_child identity '$entry' in $meta; preserving metadata." >&2
-        return 1
-        ;;
-    esac
-    child_terminal=${entry%%|*}
-    child_pane=${entry#*|}
-    if [ -z "$child_terminal" ] || [ -z "$child_pane" ] || [ "$child_pane" != "${child_pane#*|}" ]; then
-      echo "REFUSED: malformed orca_owned_child identity '$entry' in $meta; preserving metadata." >&2
-      return 1
-    fi
-    case "$seen" in
-      *"|$child_terminal|$child_pane|"*)
-        echo "REFUSED: duplicate Orca team endpoint '$entry' in $meta; preserving metadata." >&2
-        return 1
-        ;;
-    esac
-    seen="$seen$child_terminal|$child_pane|"
-  done < <(sed -n 's/^orca_owned_child=//p' "$meta")
-}
-
-require_orca_team_children_stopped() {
-  local meta=$1 worktree_id=$2 shape entry child_terminal child_pane state
-  shape=$(meta_value "$meta" orca_task_shape)
-  [ "$shape" = team ] || return 0
-  fm_backend_source orca || {
-    echo "REFUSED: cannot load the Orca backend to prove owned team children are gone; preserving metadata." >&2
-    return 1
-  }
-  while IFS= read -r entry; do
-    [ -n "$entry" ] || continue
-    child_terminal=${entry%%|*}
-    child_pane=${entry#*|}
-    state=$(fm_backend_orca_terminal_identity_state "$worktree_id" "$child_terminal" "$child_pane")
-    case "$state" in
-      dead) ;;
-      alive)
-        echo "REFUSED: owned Orca team child is still alive (terminal=$child_terminal pane=$child_pane); preserving metadata." >&2
-        return 1
-        ;;
-      mismatch)
-        echo "REFUSED: owned Orca team child identity is stale or mismatched (terminal=$child_terminal pane=$child_pane); preserving metadata." >&2
-        return 1
-        ;;
-      *)
-        echo "REFUSED: cannot prove owned Orca team child identity (terminal=$child_terminal pane=$child_pane) is gone; preserving metadata." >&2
-        return 1
-        ;;
-    esac
-  done < <(sed -n 's/^orca_owned_child=//p' "$meta")
-}
-
 if [ "$BACKEND" = orca ] && [ "$KIND" != secondmate ]; then
   ORCA_WORKTREE_ID=$(require_orca_worktree_id "$META") || exit 1
   T_ORCA=$(meta_value "$META" terminal)
   [ -z "$T_ORCA" ] || T=$T_ORCA
-fi
-if [ "$BACKEND" = orca ]; then
-  require_orca_team_metadata "$META" || exit 1
 fi
 
 remove_grok_turnend_auth() {
@@ -1096,10 +1010,6 @@ if [ "$KIND" = scout ] && [ "$FORCE" != "--force" ]; then
     echo "The report is the work product. Have the crewmate write it, or use --force after explicit discard approval." >&2
     exit 1
   fi
-fi
-
-if [ "$BACKEND" = orca ]; then
-  require_orca_team_children_stopped "$META" "$ORCA_WORKTREE_ID" || exit 1
 fi
 
 if [ "$BACKEND" = orca ] && [ "$KIND" != scout ] && [ "$KIND" != secondmate ] && [ "$FORCE" != "--force" ]; then
