@@ -22,10 +22,10 @@
 # Fail-closed rules:
 #   - add refuses unless the task meta exists, is active (no lifecycle claim),
 #     records backend=orca with an orca_worktree_id, and is not a secondmate.
-#   - add requires the verified creation shape (result.terminal.handle plus a
-#     valid result.terminal.paneKey, observed on Orca 1.4.141); a creation
-#     without a durable pane key is closed and the add aborts, because a
-#     teammate is only addressable by its pane key.
+#   - add requires a verified terminal handle and recovers a creation-time
+#     missing pane key through terminal show. If no durable pane key can be
+#     recovered, the handle is closed and proven stale or retained explicitly
+#     as teardown-owned cleanup; a live teammate is never left unrecorded.
 #   - recording is CAS: a concurrent teardown claim, generation change, or
 #     racing add makes the meta write refuse, and the just-created pane is
 #     closed rather than leaked.
@@ -112,8 +112,19 @@ team_add() {
     return 1
   fi
   if ! fm_backend_orca_pane_key_valid "$pane_key"; then
-    echo "error: orca terminal create did not return a valid pane key for $title; closing the unaddressable pane and refusing to record it" >&2
-    orca terminal close --terminal "$terminal" --json >/dev/null 2>&1 || true
+    pane_key=$(fm_backend_orca_capture_pane_key "$terminal" "$WORKTREE_ID" "$out" 2>/dev/null || true)
+  fi
+  if ! fm_backend_orca_pane_key_valid "$pane_key"; then
+    if team_close_exact_handle "$terminal"; then
+      echo "error: orca terminal create did not expose a valid pane key for $title; closed and verified the unaddressable terminal absent" >&2
+    elif pane_key=$(fm_backend_orca_capture_pane_key "$terminal" "$WORKTREE_ID" 2>/dev/null) && \
+      fm_backend_orca_meta_team_adopt_cleanup "$META" "$WORKTREE_ID" "$pane_key" "$terminal"; then
+      echo "error: orca terminal create did not initially expose a valid pane key for $title; terminal $terminal remains live and is recorded for teardown as pane $pane_key" >&2
+    elif fm_backend_orca_meta_team_adopt_terminal_cleanup "$META" "$WORKTREE_ID" "$terminal"; then
+      echo "error: orca terminal create did not expose a valid pane key for $title; terminal $terminal could not be proven absent and remains recorded for teardown" >&2
+    else
+      echo "error: orca terminal create did not expose a valid pane key for $title; terminal $terminal could not be proven absent or recorded for cleanup" >&2
+    fi
     return 1
   fi
   if ! fm_backend_orca_meta_team_append "$META" "$GENERATION" "$existing_keys" "$pane_key" "$terminal"; then
@@ -165,6 +176,12 @@ team_close_exact_pane() {
     rc=$?
   fi
   [ "$rc" -eq 2 ]
+}
+
+team_close_exact_handle() {
+  local handle=$1
+  orca terminal close --terminal "$handle" --json >/dev/null 2>&1 || true
+  fm_backend_orca_terminal_handle_absent "$handle"
 }
 
 team_close_recorded_pane() {

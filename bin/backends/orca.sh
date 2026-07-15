@@ -383,6 +383,16 @@ fm_backend_orca_raw_send_enter() { orca terminal send --terminal "$1" --text "" 
 fm_backend_orca_raw_send_interrupt() { orca terminal send --terminal "$1" --interrupt --json; }
 fm_backend_orca_raw_close() { orca terminal close --terminal "$1" --json; }
 
+fm_backend_orca_terminal_handle_absent() {  # <terminal-handle>
+  local out status code
+  if out=$(orca terminal show --terminal "$1" --json 2>/dev/null); then status=0; else status=$?; fi
+  if [ "$status" -eq 0 ] && printf '%s' "$out" | fm_backend_orca_json_ok >/dev/null 2>&1; then
+    return 1
+  fi
+  code=$(fm_backend_orca_json_error_code "$out" 2>/dev/null || true)
+  [ "$code" = terminal_handle_stale ]
+}
+
 # Run one handle operation and retry it once only when the first result carries
 # the exact terminal_handle_stale code and metadata resolves one replacement.
 fm_backend_orca_with_recovery() {  # <meta-path-or-empty> <terminal-id> <raw-fn> [args...]
@@ -733,6 +743,10 @@ fm_backend_orca_kill() {  # <terminal-id> [meta-path]
 #                                       (tabId:leafId), the authoritative record
 #   orca_team_terminals=<h> [<h>...]    runtime-epoch handle cache, same order;
 #                                       never authoritative - handles remint
+#   orca_team_cleanup_terminals=<h>...   unpaired handles retained only when
+#                                       cleanup cannot recover a durable pane;
+#                                       excluded from task identity so an active
+#                                       teardown claim can absorb them safely
 #
 # The coordinator's own terminal=/orca_pane_key= fields are unchanged and are
 # NOT part of the team lists: the coordinator stays firstmate's single direct
@@ -747,6 +761,11 @@ fm_backend_orca_team_pane_keys() {  # <meta-path>
 fm_backend_orca_team_terminals() {  # <meta-path>
   [ -f "$1" ] || return 0
   grep '^orca_team_terminals=' "$1" 2>/dev/null | tail -1 | cut -d= -f2- || true
+}
+
+fm_backend_orca_team_cleanup_terminals() {  # <meta-path>
+  [ -f "$1" ] || return 0
+  grep '^orca_team_cleanup_terminals=' "$1" 2>/dev/null | tail -1 | cut -d= -f2- || true
 }
 
 fm_backend_orca_team_edit_policy() {  # <meta-path>
@@ -832,25 +851,47 @@ fm_backend_orca_meta_team_append() {  # <meta-path> <expected-generation> <expec
 }
 
 fm_backend_orca_meta_team_adopt_cleanup() {  # <meta-path> <expected-worktree-id> <pane-key> <terminal-handle>
-  local meta=$1 expected_worktree_id=$2 pane_key=$3 terminal=$4 backend current_worktree keys terminals new_keys new_terminals tmp status=0
+  local meta=$1 expected_worktree_id=$2 pane_key=$3 terminal=$4 backend current_worktree lifecycle keys terminals cleanup_terminals
+  local new_keys new_terminals new_cleanup_terminals tmp status=0
   fm_backend_orca_pane_key_valid "$pane_key" || return 1
   [ -n "$expected_worktree_id" ] && [ -n "$terminal" ] || return 1
   fm_meta_lock_acquire "$meta" || return 1
   if [ -f "$meta" ]; then
     backend=$(grep '^backend=' "$meta" 2>/dev/null | tail -1 | cut -d= -f2- || true)
     current_worktree=$(grep '^orca_worktree_id=' "$meta" 2>/dev/null | tail -1 | cut -d= -f2- || true)
+    lifecycle=$(grep '^lifecycle=' "$meta" 2>/dev/null | tail -1 | cut -d= -f2- || true)
     keys=$(grep '^orca_team_pane_keys=' "$meta" 2>/dev/null | tail -1 | cut -d= -f2- || true)
     terminals=$(grep '^orca_team_terminals=' "$meta" 2>/dev/null | tail -1 | cut -d= -f2- || true)
+    cleanup_terminals=$(grep '^orca_team_cleanup_terminals=' "$meta" 2>/dev/null | tail -1 | cut -d= -f2- || true)
     [ "$backend" = orca ] || status=1
     [ "$current_worktree" = "$expected_worktree_id" ] || status=1
+    case "$lifecycle" in ''|teardown:*) ;; *) status=1 ;; esac
   else
     status=1
   fi
   if [ "$status" -eq 0 ] && ! fm_backend_orca_team_list_contains "$keys" "$pane_key"; then
-    new_keys="${keys:+$keys }$pane_key"
-    new_terminals="${terminals:+$terminals }$terminal"
     tmp="$meta.tmp.$$"
-    awk -v keys="$new_keys" -v terminals="$new_terminals" '
+    if [ -n "$lifecycle" ]; then
+      # A teardown claim already owns destruction of the whole worktree. Keep
+      # only the unresolved handle as cleanup work: orca_team_pane_keys is part
+      # of TEARDOWN_IDENTITY and changing it would invalidate that live claim.
+      new_cleanup_terminals=$cleanup_terminals
+      fm_backend_orca_team_list_contains "$cleanup_terminals" "$terminal" || \
+        new_cleanup_terminals="${cleanup_terminals:+$cleanup_terminals }$terminal"
+      awk -v cleanup="$new_cleanup_terminals" '
+      BEGIN { wrote_cleanup = 0 }
+      /^orca_team_cleanup_terminals=/ {
+        if (!wrote_cleanup) print "orca_team_cleanup_terminals=" cleanup
+        wrote_cleanup = 1
+        next
+      }
+      { print }
+      END { if (!wrote_cleanup) print "orca_team_cleanup_terminals=" cleanup }
+    ' "$meta" > "$tmp" || status=$?
+    else
+      new_keys="${keys:+$keys }$pane_key"
+      new_terminals="${terminals:+$terminals }$terminal"
+      awk -v keys="$new_keys" -v terminals="$new_terminals" '
       BEGIN { wrote_policy = 0; wrote_keys = 0; wrote_terminals = 0 }
       /^team_edit_policy=/ {
         if (!wrote_policy) print "team_edit_policy=coordinator-only"
@@ -873,6 +914,45 @@ fm_backend_orca_meta_team_adopt_cleanup() {  # <meta-path> <expected-worktree-id
         if (!wrote_keys) print "orca_team_pane_keys=" keys
         if (!wrote_terminals) print "orca_team_terminals=" terminals
       }
+    ' "$meta" > "$tmp" || status=$?
+    fi
+    if [ "$status" -eq 0 ]; then
+      mv "$tmp" "$meta" || status=$?
+    else
+      rm -f "$tmp"
+    fi
+  fi
+  fm_meta_lock_release "$meta"
+  return "$status"
+}
+
+fm_backend_orca_meta_team_adopt_terminal_cleanup() {  # <meta-path> <expected-worktree-id> <terminal-handle>
+  local meta=$1 expected_worktree_id=$2 terminal=$3 backend current_worktree cleanup_terminals new_cleanup_terminals tmp status=0
+  [ -n "$expected_worktree_id" ] && [ -n "$terminal" ] || return 1
+  fm_meta_lock_acquire "$meta" || return 1
+  if [ -f "$meta" ]; then
+    backend=$(grep '^backend=' "$meta" 2>/dev/null | tail -1 | cut -d= -f2- || true)
+    current_worktree=$(grep '^orca_worktree_id=' "$meta" 2>/dev/null | tail -1 | cut -d= -f2- || true)
+    cleanup_terminals=$(grep '^orca_team_cleanup_terminals=' "$meta" 2>/dev/null | tail -1 | cut -d= -f2- || true)
+    [ "$backend" = orca ] || status=1
+    [ "$current_worktree" = "$expected_worktree_id" ] || status=1
+  else
+    status=1
+  fi
+  if [ "$status" -eq 0 ]; then
+    new_cleanup_terminals=$cleanup_terminals
+    fm_backend_orca_team_list_contains "$cleanup_terminals" "$terminal" || \
+      new_cleanup_terminals="${cleanup_terminals:+$cleanup_terminals }$terminal"
+    tmp="$meta.tmp.$$"
+    awk -v cleanup="$new_cleanup_terminals" '
+      BEGIN { wrote = 0 }
+      /^orca_team_cleanup_terminals=/ {
+        if (!wrote) print "orca_team_cleanup_terminals=" cleanup
+        wrote = 1
+        next
+      }
+      { print }
+      END { if (!wrote) print "orca_team_cleanup_terminals=" cleanup }
     ' "$meta" > "$tmp" || status=$?
     if [ "$status" -eq 0 ]; then
       mv "$tmp" "$meta" || status=$?

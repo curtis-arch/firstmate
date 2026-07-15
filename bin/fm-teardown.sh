@@ -693,18 +693,17 @@ require_orca_worktree_path_match_if_present() {
   require_orca_worktree_path_match "$worktree_id" "$inspected"
 }
 
-# Enumerate and close every task-owned teammate pane recorded in the meta
-# (orca_team_pane_keys=, written only by bin/fm-team.sh) before the Orca
-# worktree is removed. Fail closed: a pane that cannot be proven gone -
+# Enumerate and close every task-owned teammate pane plus any handle-only
+# cleanup terminal recorded in the meta before the Orca worktree is removed.
+# Fail closed: an endpoint that cannot be proven gone -
 # resolution ambiguity, or still present after close - refuses teardown unless
 # --force, the captain's explicit discard path, which downgrades the refusal
 # to a warning. Landing/dirty-work safety is untouched: this runs strictly
 # after those checks, immediately before endpoint/worktree cleanup.
 close_orca_team_panes() {  # <meta-path> <worktree-id> <force-flag>
-  local meta=$1 worktree_id=$2 force=$3 keys key resolved rc handle status=0
+  local meta=$1 worktree_id=$2 force=$3 keys cleanup_terminals key resolved rc handle status=0
   fm_backend_source orca || return 1
   keys=$(fm_backend_orca_team_pane_keys "$meta")
-  [ -n "$keys" ] || return 0
   for key in $keys; do
     if resolved=$(fm_backend_orca_team_resolve_pane "$worktree_id" "$key" 2>/dev/null); then
       handle=${resolved%%$'\t'*}
@@ -723,6 +722,19 @@ close_orca_team_panes() {  # <meta-path> <worktree-id> <force-flag>
       else
         echo "REFUSED: teammate pane $key could not be proven closed before Orca worktree removal." >&2
         echo "Inspect it with bin/fm-team.sh status, close it explicitly with bin/fm-team.sh close, or use --force after explicit discard approval." >&2
+        status=1
+      fi
+    fi
+  done
+  cleanup_terminals=$(fm_backend_orca_team_cleanup_terminals "$meta")
+  for handle in $cleanup_terminals; do
+    fm_backend_orca_raw_close "$handle" >/dev/null 2>&1 || true
+    if ! fm_backend_orca_terminal_handle_absent "$handle"; then
+      if [ "$force" = "--force" ]; then
+        echo "warning: cleanup terminal $handle could not be proven closed; continuing under --force" >&2
+      else
+        echo "REFUSED: cleanup terminal $handle could not be proven closed before Orca worktree removal." >&2
+        echo "Resume teardown after Orca reports the handle stale, or use --force after explicit discard approval." >&2
         status=1
       fi
     fi

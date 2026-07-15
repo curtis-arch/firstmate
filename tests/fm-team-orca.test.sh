@@ -533,13 +533,39 @@ test_fm_team_cas_rollback_preserves_cleanup_ownership() {
   [ "$rc" -ne 0 ] || fail "an inconclusive teammate CAS rollback must fail the add"
   assert_contains "$out" "remains recorded for teardown" \
     "inconclusive CAS rollback did not report retained cleanup ownership"
-  assert_grep "orca_team_pane_keys=$MATE2_PANE $MATE_PANE" "$state/team-task.meta" \
-    "inconclusive CAS rollback did not merge cleanup ownership with the winner"
-  assert_grep 'orca_team_terminals=term_mate_2 term_mate_1' "$state/team-task.meta" \
-    "cleanup ownership lost the paired terminal cache"
+  assert_grep "orca_team_pane_keys=$MATE2_PANE" "$state/team-task.meta" \
+    "inconclusive CAS rollback changed the teardown claim's identity-bearing pane list"
+  assert_no_grep "orca_team_pane_keys=$MATE2_PANE $MATE_PANE" "$state/team-task.meta" \
+    "inconclusive CAS rollback invalidated teardown identity with a late pane key"
+  assert_grep 'orca_team_terminals=term_mate_2' "$state/team-task.meta" \
+    "cleanup ownership changed the winner's paired terminal cache"
+  assert_grep 'orca_team_cleanup_terminals=term_mate_1' "$state/team-task.meta" \
+    "cleanup ownership did not retain the late terminal outside teardown identity"
   assert_grep 'lifecycle=teardown:winning-owner' "$state/team-task.meta" \
     "cleanup ownership merge overwrote the winning lifecycle claim"
-  pass "fm-team.sh add: inconclusive CAS rollback merges ownership into the winning metadata"
+  pass "fm-team.sh add: active teardown adopts cleanup without invalidating its identity"
+}
+
+test_meta_team_cleanup_adoption_preserves_teardown_identity() {
+  local dir meta before after
+  dir="$TMP_ROOT/meta-cleanup-teardown-identity"
+  mkdir -p "$dir"
+  meta="$dir/task.meta"
+  write_team_meta "$meta" gen-1 \
+    "team_edit_policy=coordinator-only" \
+    "orca_team_pane_keys=$MATE2_PANE" "orca_team_terminals=term_mate_2" \
+    "lifecycle=teardown:owner-token:123:stamp"
+  before=$(bash -c '. "$0/bin/backends/orca.sh"; fm_meta_identity_unlocked "$1"' "$ROOT" "$meta")
+  bash -c '. "$0/bin/backends/orca.sh"; fm_backend_orca_meta_team_adopt_cleanup "$1" "$2" "$3" term_mate_1' \
+    "$ROOT" "$meta" "$WTID" "$MATE_PANE" \
+    || fail "cleanup adoption should attach to the active teardown"
+  after=$(bash -c '. "$0/bin/backends/orca.sh"; fm_meta_identity_unlocked "$1"' "$ROOT" "$meta")
+  [ "$before" = "$after" ] || fail "cleanup adoption changed active teardown identity"
+  assert_grep "orca_team_pane_keys=$MATE2_PANE" "$meta" \
+    "cleanup adoption changed the teardown-owned pane list"
+  assert_grep 'orca_team_cleanup_terminals=term_mate_1' "$meta" \
+    "cleanup adoption did not retain the unpaired terminal handle"
+  pass "cleanup adoption: active teardown identity stays stable while retaining cleanup"
 }
 
 test_fm_team_unconfirmed_contract_closes_uncontracted_pane() {
@@ -577,6 +603,29 @@ test_fm_team_unconfirmed_contract_closes_uncontracted_pane() {
   pass "fm-team.sh add: unconfirmed contract closes and removes the uncontracted pane"
 }
 
+test_fm_team_add_recovers_missing_creation_pane_key() {
+  local state out rc
+  orca_case team-add-recover-panekey
+  state="$CASE_DIR/state"
+  mkdir -p "$state"
+  touch "$state/.last-watcher-beat"
+  write_team_meta "$state/team-task.meta" gen-1
+  printf '{"ok":true,"result":{"terminal":{"handle":"term_mate_1","worktreeId":"%s","title":"t","surface":"visible"}}}\n' "$WTID" > "$RESP/1.out"
+  show_json term_mate_1 "$MATE_PANE" true true > "$RESP/2.out"
+  set +e
+  out=$( PATH="$FB:$PATH" FM_ORCA_LOG="$LOG" FM_ORCA_RESPONSES="$RESP" \
+    FM_ROOT_OVERRIDE="$ROOT" FM_STATE_OVERRIDE="$state" \
+    "$ROOT/bin/fm-team.sh" add team-task 2>&1 )
+  rc=$?
+  set -e
+  expect_code 0 "$rc" "add should recover a missing creation pane key through terminal show"$'\n'"$out"
+  assert_grep "orca_team_pane_keys=$MATE_PANE" "$state/team-task.meta" \
+    "recovered pane key was not recorded"
+  assert_not_contains "$(cat "$LOG")" $'orca\x1f''terminal'$'\x1f''close' \
+    "a successfully recovered teammate was closed"
+  pass "fm-team.sh add: terminal show recovers a missing creation pane key"
+}
+
 test_fm_team_add_closes_pane_without_durable_identity() {
   local state out rc
   orca_case team-add-no-panekey
@@ -585,6 +634,9 @@ test_fm_team_add_closes_pane_without_durable_identity() {
   touch "$state/.last-watcher-beat"
   write_team_meta "$state/team-task.meta" gen-1
   printf '{"ok":true,"result":{"terminal":{"handle":"term_mate_1","worktreeId":"%s","title":"t","surface":"visible"}}}\n' "$WTID" > "$RESP/1.out"
+  printf '{"ok":true,"result":{}}\n' > "$RESP/2.out"
+  printf '{"ok":true}\n' > "$RESP/3.out"
+  stale_json > "$RESP/4.out"
   set +e
   out=$( PATH="$FB:$PATH" FM_ORCA_LOG="$LOG" FM_ORCA_RESPONSES="$RESP" \
     FM_ROOT_OVERRIDE="$ROOT" FM_STATE_OVERRIDE="$state" \
@@ -592,11 +644,41 @@ test_fm_team_add_closes_pane_without_durable_identity() {
   rc=$?
   set -e
   [ "$rc" -ne 0 ] || fail "add must refuse a creation without a durable pane key"
-  assert_contains "$out" "did not return a valid pane key" "refusal should explain the missing durable identity"
+  assert_contains "$out" "did not expose a valid pane key" "refusal should explain the missing durable identity"
+  assert_contains "$out" "closed and verified the unaddressable terminal absent" \
+    "refusal should report conclusive handle cleanup"
   assert_contains "$(cat "$LOG")" $'orca\x1f''terminal'$'\x1f''close'$'\x1f''--terminal'$'\x1f''term_mate_1' \
     "the unaddressable pane must be closed, not leaked"
   assert_no_grep 'orca_team_pane_keys=' "$state/team-task.meta" "no teammate may be recorded without a pane key"
   pass "fm-team.sh add: creation without a pane key is closed and refused"
+}
+
+test_fm_team_add_retains_unverified_handle_for_teardown() {
+  local state out rc
+  orca_case team-add-unverified-handle
+  state="$CASE_DIR/state"
+  mkdir -p "$state"
+  touch "$state/.last-watcher-beat"
+  write_team_meta "$state/team-task.meta" gen-1
+  printf '{"ok":true,"result":{"terminal":{"handle":"term_mate_1","worktreeId":"%s","title":"t","surface":"visible"}}}\n' "$WTID" > "$RESP/1.out"
+  printf '{"ok":true,"result":{}}\n' > "$RESP/2.out"
+  printf '1\n' > "$RESP/3.exit"
+  printf '{"ok":true,"result":{}}\n' > "$RESP/4.out"
+  printf '{"ok":true,"result":{}}\n' > "$RESP/5.out"
+  set +e
+  out=$( PATH="$FB:$PATH" FM_ORCA_LOG="$LOG" FM_ORCA_RESPONSES="$RESP" \
+    FM_ROOT_OVERRIDE="$ROOT" FM_STATE_OVERRIDE="$state" \
+    "$ROOT/bin/fm-team.sh" add team-task 2>&1 )
+  rc=$?
+  set -e
+  [ "$rc" -ne 0 ] || fail "add must fail when a handle cannot be proven absent"
+  assert_contains "$out" "could not be proven absent and remains recorded for teardown" \
+    "inconclusive handle cleanup did not report retained ownership"
+  assert_grep 'orca_team_cleanup_terminals=term_mate_1' "$state/team-task.meta" \
+    "inconclusive handle cleanup left a live unrecorded teammate"
+  assert_no_grep 'orca_team_pane_keys=' "$state/team-task.meta" \
+    "handle-only cleanup invented an invalid durable pane identity"
+  pass "fm-team.sh add: inconclusive handle cleanup remains owned by teardown"
 }
 
 test_fm_team_add_refuses_non_orca_and_claimed_meta() {
@@ -690,13 +772,16 @@ test_teardown_closes_team_panes_before_worktree_removal() {
     "harness=claude" "kind=scout" "mode=no-mistakes" "yolo=off" \
     "backend=orca" "orca_worktree_id=$WTID" "orca_pane_key=$COORD_PANE" \
     "team_edit_policy=coordinator-only" \
-    "orca_team_pane_keys=$MATE_PANE" "orca_team_terminals=term_mate_1"
+    "orca_team_pane_keys=$MATE_PANE" "orca_team_terminals=term_mate_1" \
+    "orca_team_cleanup_terminals=term_cleanup_1"
   orca_case team-teardown
   printf '{"ok":true,"result":{"worktree":{"id":"%s","path":"%s"}}}\n' "$WTID" "$wt" > "$RESP/1.out"
   list_json term_mate_1 > "$RESP/2.out"
   show_json term_mate_1 "$MATE_PANE" true true > "$RESP/3.out"
   : > "$RESP/4.out"  # teammate close
   printf '{"ok":true,"result":{"terminals":[],"totalCount":0,"truncated":false}}\n' > "$RESP/5.out"
+  printf '{"ok":true}\n' > "$RESP/6.out"  # handle-only cleanup close
+  stale_json > "$RESP/7.out"
   neutral=$(neutral_fm_root "$CASE_DIR/neutral")
   set +e
   out=$( PATH="$FB:$PATH" FM_ORCA_LOG="$LOG" FM_ORCA_RESPONSES="$RESP" \
@@ -708,6 +793,8 @@ test_teardown_closes_team_panes_before_worktree_removal() {
   log_content=$(cat "$LOG")
   assert_contains "$log_content" $'orca\x1f''terminal'$'\x1f''close'$'\x1f''--terminal'$'\x1f''term_mate_1' \
     "teardown did not close the recorded teammate pane"
+  assert_contains "$log_content" $'orca\x1f''terminal'$'\x1f''close'$'\x1f''--terminal'$'\x1f''term_cleanup_1' \
+    "teardown did not close the handle-only cleanup terminal"
   assert_contains "$log_content" $'orca\x1f''terminal'$'\x1f''close'$'\x1f''--terminal'$'\x1f''term_coord' \
     "teardown did not close the coordinator terminal"
   assert_contains "$log_content" $'orca\x1f''worktree'$'\x1f''rm'$'\x1f''--worktree'$'\x1f'"id:$WTID" \
@@ -717,7 +804,7 @@ test_teardown_closes_team_panes_before_worktree_removal() {
   [ -n "$close_line" ] && [ -n "$rm_line" ] && [ "$close_line" -lt "$rm_line" ] \
     || fail "teammate pane close must happen before worktree removal (close at ${close_line:-none}, rm at ${rm_line:-none})"
   assert_absent "$state/$id.meta" "teardown should remove task metadata after full pane cleanup"
-  pass "fm-teardown.sh: enumerates and closes every recorded team pane before Orca worktree removal"
+  pass "fm-teardown.sh: closes durable panes and handle-only cleanup before worktree removal"
 }
 
 test_teardown_refuses_unprovable_team_pane() {
@@ -772,8 +859,11 @@ test_fm_team_command_timeout_closes_uncontracted_pane
 test_fm_team_command_rollback_resolves_reminted_handle
 test_fm_team_cas_rollback_closes_by_pane_key
 test_fm_team_cas_rollback_preserves_cleanup_ownership
+test_meta_team_cleanup_adoption_preserves_teardown_identity
 test_fm_team_unconfirmed_contract_closes_uncontracted_pane
+test_fm_team_add_recovers_missing_creation_pane_key
 test_fm_team_add_closes_pane_without_durable_identity
+test_fm_team_add_retains_unverified_handle_for_teardown
 test_fm_team_add_refuses_non_orca_and_claimed_meta
 test_fm_team_close_verifies_gone_then_removes_record
 test_fm_team_close_keeps_record_on_ambiguity
