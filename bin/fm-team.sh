@@ -117,14 +117,19 @@ team_add() {
     return 1
   fi
   if ! fm_backend_orca_meta_team_append "$META" "$GENERATION" "$existing_keys" "$pane_key" "$terminal"; then
-    echo "error: task $ID meta changed during teammate creation; closing the just-created pane instead of leaking it" >&2
-    orca terminal close --terminal "$terminal" --json >/dev/null 2>&1 || true
+    if team_close_exact_pane "$pane_key"; then
+      echo "error: task $ID meta changed during teammate creation; closed the unrecorded teammate pane" >&2
+    elif fm_backend_orca_meta_team_adopt_cleanup "$META" "$WORKTREE_ID" "$pane_key" "$terminal"; then
+      echo "error: task $ID meta changed during teammate creation; cleanup is inconclusive, so pane $pane_key remains recorded for teardown" >&2
+    else
+      echo "error: task $ID meta changed during teammate creation; cleanup is inconclusive and ownership could not be preserved" >&2
+    fi
     return 1
   fi
   echo "team: recorded teammate pane $pane_key (terminal $terminal, title $title) for $ID"
   if [ -n "$command" ]; then
     if ! orca terminal wait --terminal "$terminal" --for tui-idle --timeout-ms 60000 --json >/dev/null 2>&1; then
-      team_abort_uncontracted_pane "$pane_key" "$terminal" "teammate agent did not reach tui-idle within 60s"
+      team_abort_uncontracted_pane "$pane_key" "teammate agent did not reach tui-idle within 60s"
       return 1
     fi
     local preamble brief
@@ -137,38 +142,40 @@ $(cat "$brief_file")"
     fi
     state=$(fm_backend_orca_send_text_submit "$terminal" "$brief" 5 1 1 "")
     if [ "$state" != empty ]; then
-      team_abort_uncontracted_pane "$pane_key" "$terminal" "teammate contract submission reported '$state'"
+      team_abort_uncontracted_pane "$pane_key" "teammate contract submission reported '$state'"
       return 1
     fi
     echo "team: delivered coordinator-only edit contract to $pane_key"
   fi
 }
 
+team_close_exact_pane() {
+  local pane_key=$1 resolved rc handle
+  if resolved=$(fm_backend_orca_team_resolve_pane "$WORKTREE_ID" "$pane_key"); then
+    handle=${resolved%%$'\t'*}
+  else
+    rc=$?
+    [ "$rc" -eq 2 ] && return 0
+    return 1
+  fi
+  orca terminal close --terminal "$handle" --json >/dev/null 2>&1 || true
+  if fm_backend_orca_team_resolve_pane "$WORKTREE_ID" "$pane_key" >/dev/null 2>&1; then
+    return 1
+  else
+    rc=$?
+  fi
+  [ "$rc" -eq 2 ]
+}
+
 team_close_recorded_pane() {
-  local pane_key=$1 handle=${2:-} resolved rc
-  if [ -z "$handle" ]; then
-    if resolved=$(fm_backend_orca_team_resolve_pane "$WORKTREE_ID" "$pane_key"); then
-      handle=${resolved%%$'\t'*}
-    else
-      rc=$?
-      [ "$rc" -eq 2 ] || return 1
-    fi
-  fi
-  if [ -n "$handle" ]; then
-    orca terminal close --terminal "$handle" --json >/dev/null 2>&1 || true
-    if fm_backend_orca_team_resolve_pane "$WORKTREE_ID" "$pane_key" >/dev/null 2>&1; then
-      return 1
-    else
-      rc=$?
-    fi
-    [ "$rc" -eq 2 ] || return 1
-  fi
+  local pane_key=$1
+  team_close_exact_pane "$pane_key" || return 1
   fm_backend_orca_meta_team_remove "$META" "$GENERATION" "$pane_key"
 }
 
 team_abort_uncontracted_pane() {
-  local pane_key=$1 handle=$2 reason=$3
-  if team_close_recorded_pane "$pane_key" "$handle"; then
+  local pane_key=$1 reason=$2
+  if team_close_recorded_pane "$pane_key"; then
     echo "error: $reason; closed and removed uncontracted teammate pane $pane_key" >&2
   else
     echo "error: $reason; could not verify teammate pane $pane_key absent, so it remains recorded" >&2
@@ -195,23 +202,16 @@ team_close() {
   local pane_key=${1:-}
   [ -n "$pane_key" ] || { echo "error: close needs the teammate pane key to close" >&2; return 1; }
   require_team_capable_meta || return 1
-  local keys resolved rc handle
+  local keys
   keys=$(fm_backend_orca_team_pane_keys "$META")
   fm_backend_orca_team_list_contains "$keys" "$pane_key" || {
     echo "error: pane $pane_key is not a recorded teammate of $ID" >&2
     return 1
   }
-  if resolved=$(fm_backend_orca_team_resolve_pane "$WORKTREE_ID" "$pane_key"); then
-    handle=${resolved%%$'\t'*}
-    team_close_recorded_pane "$pane_key" "$handle" || {
-      echo "error: teammate pane $pane_key could not be verified closed; leaving it recorded" >&2
-      return 1
-    }
-  else
-    rc=$?
-    [ "$rc" -eq 2 ] || { echo "error: teammate pane $pane_key is unresolved (ambiguous); refusing to drop the record" >&2; return 1; }
-    team_close_recorded_pane "$pane_key" || return 1
-  fi
+  team_close_recorded_pane "$pane_key" || {
+    echo "error: teammate pane $pane_key is unresolved or could not be verified closed; leaving it recorded" >&2
+    return 1
+  }
   echo "team: closed and removed teammate pane $pane_key from $ID"
 }
 
