@@ -21,7 +21,7 @@ fm_meta_lock_release() {  # <meta-path>
 fm_meta_identity_unlocked() {  # <meta-path>
   local meta=$1 key value
   [ -f "$meta" ] || return 1
-  for key in generation kind window worktree project backend terminal orca_worktree_id orca_pane_key home lifecycle; do
+  for key in generation kind window worktree project backend terminal orca_worktree_id orca_pane_key orca_team_pane_keys team_edit_policy home lifecycle; do
     value=$(grep "^$key=" "$meta" 2>/dev/null | tail -1 | cut -d= -f2- || true)
     printf '%s=%s\n' "$key" "$value"
   done

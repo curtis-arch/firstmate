@@ -671,3 +671,266 @@ fm_backend_orca_kill() {  # <terminal-id> [meta-path]
   fm_backend_orca_tool_check || return 0
   fm_backend_orca_with_recovery "$meta" "$terminal" fm_backend_orca_raw_close >/dev/null 2>&1 || true
 }
+
+# --- Shared-worktree team panes ----------------------------------------------
+#
+# A team task is an ordinary Orca ship/scout task whose meta additionally
+# records plural durable teammate pane identities inside the SAME task
+# worktree. This is an explicit opt-in contract created by bin/fm-team.sh,
+# never something spawn or recovery infers. Contract fields (single-line,
+# space-separated lists kept in recorded order):
+#
+#   team_edit_policy=coordinator-only   the only supported concurrent-edit
+#                                       policy: the coordinator terminal owns
+#                                       every file edit and git state change;
+#                                       teammate panes are advisory
+#   orca_team_pane_keys=<pk> [<pk>...]  durable teammate identities
+#                                       (tabId:leafId), the authoritative record
+#   orca_team_terminals=<h> [<h>...]    runtime-epoch handle cache, same order;
+#                                       never authoritative - handles remint
+#
+# The coordinator's own terminal=/orca_pane_key= fields are unchanged and are
+# NOT part of the team lists: the coordinator stays firstmate's single direct
+# report; teammates are task-owned extra panes addressed only through
+# bin/fm-team.sh.
+
+fm_backend_orca_team_pane_keys() {  # <meta-path>
+  [ -f "$1" ] || return 0
+  grep '^orca_team_pane_keys=' "$1" 2>/dev/null | tail -1 | cut -d= -f2- || true
+}
+
+fm_backend_orca_team_terminals() {  # <meta-path>
+  [ -f "$1" ] || return 0
+  grep '^orca_team_terminals=' "$1" 2>/dev/null | tail -1 | cut -d= -f2- || true
+}
+
+fm_backend_orca_team_edit_policy() {  # <meta-path>
+  [ -f "$1" ] || return 0
+  grep '^team_edit_policy=' "$1" 2>/dev/null | tail -1 | cut -d= -f2- || true
+}
+
+fm_backend_orca_team_list_contains() {  # <space-list> <item>
+  local item
+  for item in $1; do
+    [ "$item" = "$2" ] && return 0
+  done
+  return 1
+}
+
+# CAS rewrite of the three team contract lines under the meta lock. The caller
+# passes the pane-key list it last read; any concurrent change (list, task
+# generation, lifecycle claim) makes the whole update refuse so a teardown or a
+# racing add can never be silently overwritten.
+fm_backend_orca_meta_team_write() {  # <meta-path> <expected-generation> <expected-pane-keys> <new-pane-keys> <new-terminals>
+  local meta=$1 expected_generation=$2 expected_keys=$3 new_keys=$4 new_terminals=$5
+  local current_generation current_keys tmp status=0
+  fm_meta_lock_acquire "$meta" || return 1
+  if [ -f "$meta" ] && fm_meta_is_active_unlocked "$meta"; then
+    current_generation=$(fm_meta_value_unlocked "$meta" generation)
+    current_keys=$(grep '^orca_team_pane_keys=' "$meta" 2>/dev/null | tail -1 | cut -d= -f2- || true)
+    [ "$current_generation" = "$expected_generation" ] || status=1
+    [ "$current_keys" = "$expected_keys" ] || status=1
+  else
+    status=1
+  fi
+  tmp="$meta.tmp.$$"
+  if [ "$status" -eq 0 ]; then
+    awk -v keys="$new_keys" -v terminals="$new_terminals" '
+    BEGIN { wrote_policy = 0; wrote_keys = 0; wrote_terminals = 0 }
+    /^team_edit_policy=/ {
+      if (!wrote_policy) print "team_edit_policy=coordinator-only"
+      wrote_policy = 1
+      next
+    }
+    /^orca_team_pane_keys=/ {
+      if (!wrote_keys && keys != "") print "orca_team_pane_keys=" keys
+      wrote_keys = 1
+      next
+    }
+    /^orca_team_terminals=/ {
+      if (!wrote_terminals && terminals != "") print "orca_team_terminals=" terminals
+      wrote_terminals = 1
+      next
+    }
+    { print }
+    END {
+      if (!wrote_policy) print "team_edit_policy=coordinator-only"
+      if (!wrote_keys && keys != "") print "orca_team_pane_keys=" keys
+      if (!wrote_terminals && terminals != "") print "orca_team_terminals=" terminals
+    }
+  ' "$meta" > "$tmp" || status=$?
+  fi
+  if [ "$status" -eq 0 ]; then
+    mv "$tmp" "$meta" || status=$?
+  else
+    rm -f "$tmp"
+  fi
+  fm_meta_lock_release "$meta"
+  return "$status"
+}
+
+fm_backend_orca_meta_team_append() {  # <meta-path> <expected-generation> <expected-pane-keys> <pane-key> <terminal-handle>
+  local meta=$1 expected_generation=$2 expected_keys=$3 pane_key=$4 terminal=$5 terminals new_keys new_terminals
+  fm_backend_orca_pane_key_valid "$pane_key" || {
+    echo "error: refusing to record invalid teammate pane key '$pane_key'" >&2
+    return 1
+  }
+  [ -n "$terminal" ] || { echo "error: refusing to record teammate pane without a terminal handle" >&2; return 1; }
+  if fm_backend_orca_team_list_contains "$expected_keys" "$pane_key"; then
+    echo "error: teammate pane $pane_key is already recorded in $meta" >&2
+    return 1
+  fi
+  terminals=$(fm_backend_orca_team_terminals "$meta")
+  new_keys="${expected_keys:+$expected_keys }$pane_key"
+  new_terminals="${terminals:+$terminals }$terminal"
+  fm_backend_orca_meta_team_write "$meta" "$expected_generation" "$expected_keys" "$new_keys" "$new_terminals"
+}
+
+fm_backend_orca_meta_team_remove() {  # <meta-path> <expected-generation> <pane-key>
+  local meta=$1 expected_generation=$2 pane_key=$3 keys terminals new_keys='' new_terminals='' key terminal i=0
+  local -a terminal_arr=()
+  keys=$(fm_backend_orca_team_pane_keys "$meta")
+  fm_backend_orca_team_list_contains "$keys" "$pane_key" || {
+    echo "error: teammate pane $pane_key is not recorded in $meta" >&2
+    return 1
+  }
+  terminals=$(fm_backend_orca_team_terminals "$meta")
+  # shellcheck disable=SC2206  # handles/pane keys never contain whitespace
+  terminal_arr=($terminals)
+  for key in $keys; do
+    terminal=${terminal_arr[$i]:-}
+    i=$((i + 1))
+    [ "$key" = "$pane_key" ] && continue
+    new_keys="${new_keys:+$new_keys }$key"
+    [ -z "$terminal" ] || new_terminals="${new_terminals:+$new_terminals }$terminal"
+  done
+  fm_backend_orca_meta_team_write "$meta" "$expected_generation" "$keys" "$new_keys" "$new_terminals"
+}
+
+# fm_backend_orca_team_resolve_pane: resolve one durable pane identity inside
+# one worktree to its current runtime handle, with three distinguishable
+# outcomes so callers can fail closed on ambiguity:
+#   exit 0  exactly one match; prints "<handle>\t<connected>\t<writable>"
+#   exit 2  definitively gone: full enumeration succeeded and zero terminals
+#           carry this pane key
+#   exit 1  unresolved: list failure, malformed shapes, an unreadable
+#           candidate, or duplicate matches - never treated as gone
+# `terminal show` (not list) owns identity because list results expose
+# non-joinable `pty:` placeholder tab/leaf ids (observed on Orca 1.4.141).
+fm_backend_orca_team_resolve_pane() {  # <worktree-id> <pane-key>
+  local worktree_id=$1 pane_key=$2 list_out handles handle show_out record candidate_worktree rest candidate_pane connected writable unresolved=0
+  local -a matches=() match_meta=()
+  [ -n "$worktree_id" ] || { echo "error: team pane resolution needs a worktree id" >&2; return 1; }
+  fm_backend_orca_pane_key_valid "$pane_key" || { echo "error: team pane resolution needs a valid pane key, got '$pane_key'" >&2; return 1; }
+  list_out=$(orca terminal list --worktree "id:$worktree_id" --json 2>/dev/null) || {
+    echo "error: team pane unresolved: terminal list failed for worktree $worktree_id" >&2
+    return 1
+  }
+  handles=$(fm_backend_orca_json_terminal_handles "$list_out" 2>/dev/null) || {
+    echo "error: team pane unresolved: invalid terminal list for worktree $worktree_id" >&2
+    return 1
+  }
+  while IFS= read -r handle; do
+    [ -n "$handle" ] || continue
+    show_out=$(orca terminal show --terminal "$handle" --json 2>/dev/null) || {
+      echo "error: team pane unresolved: candidate $handle could not be shown" >&2
+      unresolved=1
+      continue
+    }
+    record=$(fm_backend_orca_terminal_record "$show_out" 2>/dev/null) || {
+      echo "error: team pane unresolved: candidate $handle returned an invalid terminal shape" >&2
+      unresolved=1
+      continue
+    }
+    candidate_worktree=${record%%$'\t'*}
+    rest=${record#*$'\t'}
+    candidate_pane=${rest%%$'\t'*}
+    rest=${rest#*$'\t'}
+    connected=${rest%%$'\t'*}
+    writable=${rest#*$'\t'}
+    fm_backend_orca_pane_key_valid "$candidate_pane" || {
+      echo "error: team pane unresolved: candidate $handle returned an invalid pane key" >&2
+      unresolved=1
+      continue
+    }
+    if [ "$candidate_worktree" = "$worktree_id" ] && [ "$candidate_pane" = "$pane_key" ]; then
+      matches+=("$handle")
+      match_meta+=("$connected"$'\t'"$writable")
+    fi
+  done <<< "$handles"
+  [ "$unresolved" -eq 0 ] || return 1
+  case "${#matches[@]}" in
+    0) return 2 ;;
+    1) printf '%s\t%s' "${matches[0]}" "${match_meta[0]}" ;;
+    *)
+      echo "error: team pane ambiguous: pane $pane_key matches multiple terminals: ${matches[*]}" >&2
+      return 1
+      ;;
+  esac
+}
+
+# fm_backend_orca_team_pane_state: per-pane inventory read for one recorded
+# teammate. Every value is a directly observable CLI fact, never a guess:
+#   working   the pane's exact paneKey appears in the exact worktree's
+#             well-formed agents[] with state "working"
+#   done      same join with state "done" (turn complete, agent still open)
+#   no-agent  the pane is connected and writable but its exact paneKey is
+#             absent from the worktree's well-formed agents[] inventory -
+#             a plain shell or an exited agent occupies the pane
+#   gone      no terminal in the worktree carries this pane key (clean
+#             enumeration; the pane was closed)
+#   unknown   anything else - resolution ambiguity, malformed inventory,
+#             disconnected/non-writable pane, duplicate identities
+# This is deliberately a separate reader from the coordinator's
+# fm_backend_orca_agent_snapshot: the coordinator's accepted E1b liveness
+# contract (empty agents[] => dead) is unchanged.
+fm_backend_orca_team_pane_state() {  # <worktree-id> <pane-key>
+  local worktree_id=${1:-} pane_key=${2:-} resolved rc handle rest connected writable ps_out state
+  [ -n "$worktree_id" ] && [ -n "$pane_key" ] || { printf 'unknown'; return 0; }
+  fm_backend_orca_tool_check >/dev/null 2>&1 || { printf 'unknown'; return 0; }
+  if resolved=$(fm_backend_orca_team_resolve_pane "$worktree_id" "$pane_key" 2>/dev/null); then
+    rc=0
+  else
+    rc=$?
+  fi
+  if [ "$rc" -eq 2 ]; then
+    printf 'gone'
+    return 0
+  fi
+  [ "$rc" -eq 0 ] || { printf 'unknown'; return 0; }
+  handle=${resolved%%$'\t'*}
+  rest=${resolved#*$'\t'}
+  connected=${rest%%$'\t'*}
+  writable=${rest#*$'\t'}
+  : "$handle"
+  { [ "$connected" = true ] && [ "$writable" = true ]; } || { printf 'unknown'; return 0; }
+  ps_out=$(orca worktree ps --json 2>/dev/null) || { printf 'unknown'; return 0; }
+  state=$(printf '%s' "$ps_out" | node -e '
+const fs = require("fs");
+const worktreeId = process.argv[1];
+const paneKey = process.argv[2];
+let data;
+try {
+  data = JSON.parse(fs.readFileSync(0, "utf8"));
+} catch (_) {
+  process.exit(1);
+}
+if (data.ok !== true || !data.result || !Array.isArray(data.result.worktrees)) process.exit(1);
+const worktrees = data.result.worktrees.filter((worktree) => worktree && worktree.worktreeId === worktreeId);
+if (worktrees.length !== 1 || !Array.isArray(worktrees[0].agents)) process.exit(1);
+if (!worktrees[0].agents.every((agent) => agent && typeof agent === "object" && typeof agent.paneKey === "string" && agent.paneKey.length > 0 && typeof agent.state === "string" && agent.state.length > 0)) process.exit(1);
+const agents = worktrees[0].agents.filter((agent) => agent.paneKey === paneKey);
+if (agents.length === 0) {
+  process.stdout.write("no-agent");
+  process.exit(0);
+}
+if (agents.length !== 1) process.exit(1);
+const state = agents[0].state;
+if (state !== "working" && state !== "done") process.exit(1);
+process.stdout.write(state);
+' "$worktree_id" "$pane_key" 2>/dev/null) || { printf 'unknown'; return 0; }
+  case "$state" in
+    working|done|no-agent) printf '%s' "$state" ;;
+    *) printf 'unknown' ;;
+  esac
+}
