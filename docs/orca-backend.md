@@ -69,6 +69,20 @@ For Orca, `window=` keeps the stable firstmate alias, `terminal=` carries the ru
 The cross-backend `generation=` value is immutable for one task incarnation, while an absent `lifecycle=` means active and `lifecycle=teardown:<owner>` is a temporary destructive-cleanup claim.
 The recorded `backend=orca` field tells shared call sites to route capture, send, interrupt, and close through `bin/backends/orca.sh` instead of tmux assumptions.
 
+The optional team-task shape is explicit and additive, so existing single-crewmate metadata remains unchanged:
+
+```text
+orca_task_shape=team
+orca_coordinator_terminal=<terminal handle; must equal terminal=>
+orca_coordinator_pane_id=<leaf id>
+orca_owned_child=<terminal handle>|<leaf id>
+orca_owned_child=<terminal handle>|<leaf id>
+```
+
+`orca_owned_child=` may occur zero or more times.
+Each record is one endpoint owned by the coordinator in the same `orca_worktree_id`; unrecorded terminals are never inferred to be children.
+The team shape is unsupported for `kind=secondmate`, and teardown refuses that nesting explicitly.
+
 ## Lifecycle
 
 Spawn:
@@ -126,6 +140,8 @@ Teardown:
 - Ship teardown still refuses dirty or unlanded work before any terminal/worktree cleanup.
 - Ship teardown resolves `orca_worktree_id` back through Orca and verifies it matches the inspected `worktree=` path before removing anything; mismatches or uninspectable paths preserve metadata and fail closed.
 - After the existing firstmate safety checks pass, teardown closes the recorded Orca terminal and releases the recorded worktree through `orca worktree rm --worktree id:<orca_worktree_id> --force`.
+- For `orca_task_shape=team`, teardown first queries terminals only within the recorded Orca worktree and matches each child by its exact terminal handle and pane leaf id.
+  A recorded child that is still alive, partially matches a stale identity, appears outside the requested worktree scope, or cannot be checked from a complete response makes teardown fail closed before closing the coordinator or removing the worktree.
 - Teardown does not raw-delete Orca worktrees.
 
 ## Limitations

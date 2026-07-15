@@ -1380,6 +1380,143 @@ test_secondmate_force_teardown_removes_partial_orca_child() {
   pass "fm-teardown.sh --force: removes partial Orca secondmate children"
 }
 
+test_team_teardown_accepts_multiple_proven_dead_children() {
+  local proj wt data state config id out rc neutral listing
+  id="orcateamcleanz1"
+  proj="$TMP_ROOT/team-clean-project"
+  wt="$TMP_ROOT/team-clean-wt"
+  data="$TMP_ROOT/team-clean-data"
+  state="$TMP_ROOT/team-clean-state"
+  config="$TMP_ROOT/team-clean-config"
+  fm_git_worktree "$proj" "$wt" "fm/$id"
+  mkdir -p "$data/$id" "$state" "$config"
+  printf 'report\n' > "$data/$id/report.md"
+  touch "$state/.last-watcher-beat"
+  fm_write_meta "$state/$id.meta" \
+    "window=fm-$id" "terminal=term-coordinator" "worktree=$wt" "project=$proj" \
+    "harness=claude" "kind=scout" "mode=no-mistakes" "yolo=off" \
+    "backend=orca" "orca_worktree_id=wt-team-clean" "orca_task_shape=team" \
+    "orca_coordinator_terminal=term-coordinator" "orca_coordinator_pane_id=pane-coordinator" \
+    "orca_owned_child=term-child-a|pane-child-a" "orca_owned_child=term-child-b|pane-child-b"
+  orca_case team-clean
+  listing='{"ok":true,"result":{"terminals":[{"handle":"term-coordinator","leafId":"pane-coordinator","worktreeId":"wt-team-clean"}],"truncated":false}}'
+  printf '%s\n' "$listing" > "$RESP/1.out"
+  printf '%s\n' "$listing" > "$RESP/2.out"
+  printf '{"ok":true,"result":{"worktree":{"id":"wt-team-clean","path":"%s"}}}\n' "$wt" > "$RESP/3.out"
+  neutral=$(neutral_fm_root "$CASE_DIR/neutral")
+  set +e
+  out=$( PATH="$FB:$PATH" FM_ORCA_LOG="$LOG" FM_ORCA_RESPONSES="$RESP" \
+    FM_ROOT_OVERRIDE="$neutral" FM_STATE_OVERRIDE="$state" FM_DATA_OVERRIDE="$data" FM_CONFIG_OVERRIDE="$config" \
+    "$ROOT/bin/fm-teardown.sh" "$id" 2>&1 )
+  rc=$?
+  set -e
+  expect_code 0 "$rc" "team teardown should succeed when every recorded child is provably absent"$'\n'"$out"
+  assert_contains "$(cat "$LOG")" $'orca\x1f''terminal'$'\x1f''list'$'\x1f''--worktree'$'\x1f''id:wt-team-clean' \
+    "team teardown did not scope child lookups to the recorded worktree"
+  assert_contains "$(cat "$LOG")" $'orca\x1f''terminal'$'\x1f''close'$'\x1f''--terminal'$'\x1f''term-coordinator' \
+    "team teardown did not close the recorded coordinator"
+  assert_absent "$state/$id.meta" "successful team teardown should remove metadata"
+  pass "fm-teardown.sh backend=orca team: multiple absent children permit teardown"
+}
+
+test_team_teardown_refuses_live_owned_child() {
+  local proj wt data state config id out rc neutral
+  id="orcateamlivez2"
+  proj="$TMP_ROOT/team-live-project"
+  wt="$TMP_ROOT/team-live-wt"
+  data="$TMP_ROOT/team-live-data"
+  state="$TMP_ROOT/team-live-state"
+  config="$TMP_ROOT/team-live-config"
+  fm_git_worktree "$proj" "$wt" "fm/$id"
+  mkdir -p "$data/$id" "$state" "$config"
+  printf 'report\n' > "$data/$id/report.md"
+  touch "$state/.last-watcher-beat"
+  fm_write_meta "$state/$id.meta" \
+    "window=fm-$id" "terminal=term-coordinator" "worktree=$wt" "project=$proj" \
+    "harness=claude" "kind=scout" "mode=no-mistakes" "yolo=off" \
+    "backend=orca" "orca_worktree_id=wt-team-live" "orca_task_shape=team" \
+    "orca_coordinator_terminal=term-coordinator" "orca_coordinator_pane_id=pane-coordinator" \
+    "orca_owned_child=term-child|pane-child"
+  orca_case team-live
+  printf '%s\n' '{"ok":true,"result":{"terminals":[{"handle":"term-child","leafId":"pane-child","worktreeId":"wt-team-live"}],"truncated":false}}' > "$RESP/1.out"
+  neutral=$(neutral_fm_root "$CASE_DIR/neutral")
+  set +e
+  out=$( PATH="$FB:$PATH" FM_ORCA_LOG="$LOG" FM_ORCA_RESPONSES="$RESP" \
+    FM_ROOT_OVERRIDE="$neutral" FM_STATE_OVERRIDE="$state" FM_DATA_OVERRIDE="$data" FM_CONFIG_OVERRIDE="$config" \
+    "$ROOT/bin/fm-teardown.sh" "$id" 2>&1 )
+  rc=$?
+  set -e
+  [ "$rc" -ne 0 ] || fail "team teardown should refuse a live owned child"
+  assert_contains "$out" "owned Orca team child is still alive" "live-child refusal should be explicit"
+  assert_not_contains "$(cat "$LOG")" $'orca\x1f''terminal'$'\x1f''close' "refusal must precede coordinator close"
+  assert_not_contains "$(cat "$LOG")" $'orca\x1f''worktree'$'\x1f''rm' "refusal must precede worktree removal"
+  assert_present "$state/$id.meta" "live-child refusal should preserve metadata"
+  pass "fm-teardown.sh backend=orca team: live owned child fails closed"
+}
+
+test_team_teardown_refuses_mismatched_owned_child_identity() {
+  local proj wt data state config id out rc neutral
+  id="orcateammismatchz3"
+  proj="$TMP_ROOT/team-mismatch-project"
+  wt="$TMP_ROOT/team-mismatch-wt"
+  data="$TMP_ROOT/team-mismatch-data"
+  state="$TMP_ROOT/team-mismatch-state"
+  config="$TMP_ROOT/team-mismatch-config"
+  fm_git_worktree "$proj" "$wt" "fm/$id"
+  mkdir -p "$data/$id" "$state" "$config"
+  printf 'report\n' > "$data/$id/report.md"
+  touch "$state/.last-watcher-beat"
+  fm_write_meta "$state/$id.meta" \
+    "window=fm-$id" "terminal=term-coordinator" "worktree=$wt" "project=$proj" \
+    "harness=claude" "kind=scout" "mode=no-mistakes" "yolo=off" \
+    "backend=orca" "orca_worktree_id=wt-team-mismatch" "orca_task_shape=team" \
+    "orca_coordinator_terminal=term-coordinator" "orca_coordinator_pane_id=pane-coordinator" \
+    "orca_owned_child=term-child|pane-recorded"
+  orca_case team-mismatch
+  printf '%s\n' '{"ok":true,"result":{"terminals":[{"handle":"term-child","leafId":"pane-reminted","worktreeId":"wt-team-mismatch"}],"truncated":false}}' > "$RESP/1.out"
+  neutral=$(neutral_fm_root "$CASE_DIR/neutral")
+  set +e
+  out=$( PATH="$FB:$PATH" FM_ORCA_LOG="$LOG" FM_ORCA_RESPONSES="$RESP" \
+    FM_ROOT_OVERRIDE="$neutral" FM_STATE_OVERRIDE="$state" FM_DATA_OVERRIDE="$data" FM_CONFIG_OVERRIDE="$config" \
+    "$ROOT/bin/fm-teardown.sh" "$id" 2>&1 )
+  rc=$?
+  set -e
+  [ "$rc" -ne 0 ] || fail "team teardown should refuse a stale or mismatched child identity"
+  assert_contains "$out" "identity is stale or mismatched" "mismatched-child refusal should be explicit"
+  assert_not_contains "$(cat "$LOG")" $'orca\x1f''terminal'$'\x1f''close' "mismatch refusal must precede coordinator close"
+  assert_not_contains "$(cat "$LOG")" $'orca\x1f''worktree'$'\x1f''rm' "mismatch refusal must precede worktree removal"
+  assert_present "$state/$id.meta" "mismatch refusal should preserve metadata"
+  pass "fm-teardown.sh backend=orca team: stale identity fails closed"
+}
+
+test_team_teardown_refuses_secondmate_nesting() {
+  local home state data config id out rc neutral
+  id="orcateamsecondmatez4"
+  home="$TMP_ROOT/team-secondmate-home"
+  state="$TMP_ROOT/team-secondmate-state"
+  data="$TMP_ROOT/team-secondmate-data"
+  config="$TMP_ROOT/team-secondmate-config"
+  mkdir -p "$home" "$state" "$data" "$config"
+  fm_write_meta "$state/$id.meta" \
+    "window=fm-$id" "terminal=term-coordinator" "worktree=$home" "project=$home" \
+    "harness=claude" "kind=secondmate" "mode=secondmate" "yolo=off" \
+    "backend=orca" "orca_worktree_id=wt-team-secondmate" "orca_task_shape=team" \
+    "orca_coordinator_terminal=term-coordinator" "orca_coordinator_pane_id=pane-coordinator"
+  orca_case team-secondmate
+  neutral=$(neutral_fm_root "$CASE_DIR/neutral")
+  set +e
+  out=$( PATH="$FB:$PATH" FM_ORCA_LOG="$LOG" FM_ORCA_RESPONSES="$RESP" \
+    FM_ROOT_OVERRIDE="$neutral" FM_STATE_OVERRIDE="$state" FM_DATA_OVERRIDE="$data" FM_CONFIG_OVERRIDE="$config" \
+    "$ROOT/bin/fm-teardown.sh" "$id" --force 2>&1 )
+  rc=$?
+  set -e
+  [ "$rc" -ne 0 ] || fail "Orca team teardown should refuse secondmate nesting"
+  assert_contains "$out" "cannot be nested under kind=secondmate" "secondmate/team nesting refusal should be explicit"
+  [ ! -s "$LOG" ] || fail "secondmate/team refusal should not query or mutate Orca"
+  assert_present "$state/$id.meta" "secondmate/team refusal should preserve metadata"
+  pass "fm-teardown.sh backend=orca team: secondmate nesting is unsupported"
+}
+
 test_dispatcher_sources_orca_and_routes_primitives() {
   local out
   orca_case dispatch
@@ -2146,3 +2283,7 @@ test_teardown_removes_orca_worktree_without_terminal_handle
 test_secondmate_force_teardown_removes_orca_child_via_orca
 test_secondmate_force_teardown_refuses_orca_child_id_path_mismatch
 test_secondmate_force_teardown_removes_partial_orca_child
+test_team_teardown_accepts_multiple_proven_dead_children
+test_team_teardown_refuses_live_owned_child
+test_team_teardown_refuses_mismatched_owned_child_identity
+test_team_teardown_refuses_secondmate_nesting
