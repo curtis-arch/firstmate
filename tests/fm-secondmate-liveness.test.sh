@@ -226,10 +226,24 @@ make_liveness_tmux() {
 set -u
 case "${1:-}" in
   display-message)
+    [ -z "${FM_TMUX_ENDPOINT_STATE:-}" ] || [ ! -f "$FM_TMUX_ENDPOINT_STATE" ] || exit 1
     for a in "$@"; do case "$a" in *pane_current_command*) printf '%s\n' "${FM_TEST_PANE_CMD:-zsh}"; exit 0 ;; esac; done
     exit 0 ;;
-  new-window|kill-window)
+  new-window)
     printf '%s\n' "$*" >> "${FM_TMUX_CALL_LOG:?}"
+    [ -z "${FM_TMUX_ENDPOINT_STATE:-}" ] || rm -f "$FM_TMUX_ENDPOINT_STATE"
+    exit 0 ;;
+  kill-window)
+    printf '%s\n' "$*" >> "${FM_TMUX_CALL_LOG:?}"
+    if [ -z "${FM_TEST_KILL_STICKS:-}" ] || [ ! -f "${FM_TEST_SEND_FAILED_MARKER:-/dev/null}" ]; then
+      [ -z "${FM_TMUX_ENDPOINT_STATE:-}" ] || : > "$FM_TMUX_ENDPOINT_STATE"
+    fi
+    exit 0 ;;
+  send-keys)
+    if [ -n "${FM_TEST_FAIL_SEND_KEYS:-}" ]; then
+      [ -z "${FM_TEST_SEND_FAILED_MARKER:-}" ] || : > "$FM_TEST_SEND_FAILED_MARKER"
+      exit 1
+    fi
     exit 0 ;;
   list-windows|has-session) exit 0 ;;
 esac
@@ -332,12 +346,13 @@ test_direct_duplicate_secondmate_refuses_before_mutation() {
 }
 
 test_replacement_failure_cleans_new_endpoint_and_stale_metadata() {
-  local w fb tmuxfb log out status id task_tmp kill_count
+  local w fb tmuxfb log out status id task_tmp kill_count endpoint_state
   id="smatomic$$"
   w=$(new_world replacement-atomic)
   add_sm_home "$w" "$id" "firstmate:fm-$id"
   fb=$(make_toolchain "$w"); tmuxfb=$(make_liveness_tmux "$w")
   log="$w/calls.log"; : > "$log"
+  endpoint_state="$w/endpoint-gone"
   task_tmp="/tmp/fm-$id"
   rm -rf "$task_tmp"
   : > "$task_tmp"
@@ -345,6 +360,7 @@ test_replacement_failure_cleans_new_endpoint_and_stale_metadata() {
   set +e
   out=$(PATH="$tmuxfb:$fb:$BASE_PATH" TMUX='' FM_BACKEND=tmux FM_HOME="$w/home" \
     FM_TEST_PANE_CMD=zsh FM_TMUX_CALL_LOG="$log" FM_SPAWN_NO_GUARD=1 \
+    FM_TMUX_ENDPOINT_STATE="$endpoint_state" \
     FM_SPAWN_REPLACE_GENERATION="initial-$id" \
     "$ROOT/bin/fm-spawn.sh" "$id" --secondmate 2>&1)
   status=$?
@@ -358,6 +374,65 @@ test_replacement_failure_cleans_new_endpoint_and_stale_metadata() {
   [ "$kill_count" -eq 2 ] || fail "replacement failure should kill old and new endpoints, got $kill_count kills: $(cat "$log")"
   [ ! -e "$w/home/state/$id.meta" ] || fail "replacement failure left stale killed-endpoint metadata"
   pass "spawn: failed secondmate replacement cleans its new endpoint and stale metadata"
+}
+
+test_replacement_launch_failure_rolls_back_published_metadata() {
+  local w fb tmuxfb log out status id endpoint_state failed_marker kill_count
+  id="smlaunchfail$$"
+  w=$(new_world replacement-launch-failure)
+  add_sm_home "$w" "$id" "firstmate:fm-$id"
+  fb=$(make_toolchain "$w"); tmuxfb=$(make_liveness_tmux "$w")
+  log="$w/calls.log"; : > "$log"
+  endpoint_state="$w/endpoint-gone"
+  failed_marker="$w/send-failed"
+
+  set +e
+  out=$(PATH="$tmuxfb:$fb:$BASE_PATH" TMUX='' FM_BACKEND=tmux FM_HOME="$w/home" \
+    FM_TEST_PANE_CMD=zsh FM_TMUX_CALL_LOG="$log" FM_SPAWN_NO_GUARD=1 \
+    FM_TMUX_ENDPOINT_STATE="$endpoint_state" FM_TEST_FAIL_SEND_KEYS=1 \
+    FM_TEST_SEND_FAILED_MARKER="$failed_marker" \
+    FM_SPAWN_REPLACE_GENERATION="initial-$id" \
+    "$ROOT/bin/fm-spawn.sh" "$id" --secondmate 2>&1)
+  status=$?
+  set -e
+
+  [ "$status" -ne 0 ] || fail "replacement should fail when launch dispatch fails"
+  assert_present "$failed_marker" "replacement fixture did not reach launch dispatch"
+  kill_count=$(grep -c '^kill-window ' "$log" || true)
+  [ "$kill_count" -eq 2 ] || fail "launch failure should kill old and new endpoints, got $kill_count kills: $(cat "$log")"
+  assert_absent "$w/home/state/$id.meta" "verified endpoint closure should remove inactive replacement metadata"
+  pass "spawn: launch failure rolls back the published replacement only after verified closure"
+}
+
+test_replacement_failed_close_preserves_claimed_metadata() {
+  local w fb tmuxfb log out status id endpoint_state failed_marker meta
+  id="smclosefail$$"
+  w=$(new_world replacement-close-failure)
+  add_sm_home "$w" "$id" "firstmate:fm-$id"
+  fb=$(make_toolchain "$w"); tmuxfb=$(make_liveness_tmux "$w")
+  log="$w/calls.log"; : > "$log"
+  endpoint_state="$w/endpoint-gone"
+  failed_marker="$w/send-failed"
+  meta="$w/home/state/$id.meta"
+
+  set +e
+  out=$(PATH="$tmuxfb:$fb:$BASE_PATH" TMUX='' FM_BACKEND=tmux FM_HOME="$w/home" \
+    FM_TEST_PANE_CMD=zsh FM_TMUX_CALL_LOG="$log" FM_SPAWN_NO_GUARD=1 \
+    FM_TMUX_ENDPOINT_STATE="$endpoint_state" FM_TEST_FAIL_SEND_KEYS=1 FM_TEST_KILL_STICKS=1 \
+    FM_TEST_SEND_FAILED_MARKER="$failed_marker" \
+    FM_SPAWN_REPLACE_GENERATION="initial-$id" \
+    "$ROOT/bin/fm-spawn.sh" "$id" --secondmate 2>&1)
+  status=$?
+  set -e
+
+  [ "$status" -ne 0 ] || fail "replacement should fail when launch dispatch fails"
+  assert_contains "$out" "preserved replacement ownership" \
+    "failed endpoint closure did not explain the retained replacement claim"
+  assert_grep 'lifecycle=replacement:' "$meta" \
+    "failed endpoint closure released the inactive replacement claim"
+  assert_not_contains "$(cat "$meta")" "generation=initial-$id" \
+    "failed endpoint closure retained stale killed-endpoint metadata"
+  pass "spawn: unverified endpoint closure preserves inactive replacement ownership"
 }
 
 test_sweep_leaves_alive_secondmate_untouched() {
@@ -471,6 +546,8 @@ test_meta_process_stamp_is_locale_invariant
 test_sweep_respawns_confirmed_dead_secondmate
 test_direct_duplicate_secondmate_refuses_before_mutation
 test_replacement_failure_cleans_new_endpoint_and_stale_metadata
+test_replacement_launch_failure_rolls_back_published_metadata
+test_replacement_failed_close_preserves_claimed_metadata
 test_sweep_leaves_alive_secondmate_untouched
 test_sweep_never_acts_on_inconclusive_reading
 test_sweep_never_acts_on_unverified_harness_dead_reading

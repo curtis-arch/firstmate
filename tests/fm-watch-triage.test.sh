@@ -401,6 +401,36 @@ SH
   pass "watcher: missing Orca PTY is bypassed; exact worktree absence surfaces a distinct task wake"
 }
 
+test_orca_inactive_metadata_skips_destruction_wake() {
+  local dir state fakebin out id pid
+  dir=$(make_case orca-inactive-worktree); state="$dir/state"; fakebin="$dir/fakebin"
+  out="$dir/watch.out"; id="orca-inactive-w2"
+  fm_write_meta "$state/$id.meta" \
+    "window=fm-$id" "terminal=term-inactive" "backend=orca" \
+    "orca_worktree_id=wt-inactive" "worktree=$dir/missing-wt" "project=$dir/project" "kind=ship" \
+    "lifecycle=teardown:owner"
+  cat > "$fakebin/orca" <<'SH'
+#!/usr/bin/env bash
+case "${1:-} ${2:-}" in
+  "status --json") printf '{"ok":true,"result":{"runtime":{"reachable":true,"state":"ready"}}}\n' ;;
+  "worktree show") printf '{"ok":false,"error":{"code":"worktree_not_found","message":"gone"}}\n' ;;
+  *) exit 1 ;;
+esac
+SH
+  chmod +x "$fakebin/orca"
+  watch_bg "$state" "$fakebin" "$out"
+  pid=$!
+  if ! wait_live "$pid" 20; then
+    reap "$pid"; fail "watcher surfaced inactive teardown metadata as external destruction: $(cat "$out")"
+  fi
+  [ ! -s "$out" ] || fail "inactive Orca metadata printed a wake reason: $(cat "$out")"
+  [ ! -s "$state/.wake-queue" ] || fail "inactive Orca metadata queued a destruction wake"
+  assert_absent "$state/.possible-external-destruction-$id" \
+    "inactive Orca metadata recorded a destruction suppressor"
+  reap "$pid"
+  pass "watcher: inactive Orca metadata bypasses external-destruction probes"
+}
+
 test_terminal_stale_surfaced() {
   local dir state fakebin out drain_out capture_file window key pane_hash sig pid
   dir=$(make_case terminal-stale); state="$dir/state"; fakebin="$dir/fakebin"
@@ -1194,6 +1224,7 @@ test_turn_ended_not_working_surfaced
 test_working_note_not_working_surfaced
 test_actionable_signal_surfaced
 test_orca_worktree_destruction_surfaces_without_endpoint
+test_orca_inactive_metadata_skips_destruction_wake
 test_terminal_stale_surfaced
 test_stale_terminal_status_overridden_by_active_run
 test_nonterminal_stale_provably_working_absorbed_then_escalated
