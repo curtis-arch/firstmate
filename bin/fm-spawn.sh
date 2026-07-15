@@ -179,7 +179,15 @@ fi
 fm_backend_validate_spawn "$BACKEND" || exit 1
 fm_backend_source "$BACKEND" || exit 1
 if [ "$BACKEND" = orca ] && [ "$KIND" = secondmate ]; then
-  echo "error: backend=orca does not support --secondmate spawns yet" >&2
+  # Precise design boundary, not a temporary gap: a secondmate home is a
+  # persistent seeded directory that already exists on disk, and Orca 1.4.x
+  # exposes no CLI primitive to adopt an existing directory as an Orca-managed
+  # worktree - `orca worktree create` always creates a fresh checkout from a
+  # registered repo, and `orca terminal create --worktree` only targets
+  # Orca-managed worktrees. Without adoption, an Orca secondmate would lose
+  # home/lifecycle parity (persistent home, liveness sweep, guarded teardown),
+  # so the spawn refuses instead of pretending.
+  echo "error: backend=orca does not support --secondmate spawns: Orca has no adopt-existing-directory worktree primitive (orca worktree create only creates fresh checkouts), so a seeded secondmate home cannot become an Orca terminal host with lifecycle parity" >&2
   exit 1
 fi
 if [ "$BACKEND" = cmux ] && [ "$KIND" = secondmate ]; then
