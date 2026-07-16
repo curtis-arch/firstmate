@@ -4,9 +4,10 @@
 # per-pane inventory state in bin/backends/orca.sh, the bin/fm-team.sh
 # lifecycle, and fm-teardown.sh's enumerate-and-close-before-worktree-removal
 # guarantee. All JSON fixtures use the exact shapes observed live against Orca
-# app 1.4.141 (terminal create/list/show/close, worktree ps, and the
-# terminal_handle_stale error), including the non-joinable `pty:` placeholder
-# tab/leaf ids that terminal list exposes.
+# app 1.4.143 on 2026-07-16 (terminal create/list/show/close and worktree ps),
+# including the non-joinable `pty:` placeholder tab/leaf ids that terminal list
+# exposes. The terminal_handle_stale shape was first observed on 1.4.141 and
+# reconfirmed on 1.4.143.
 set -u
 
 # shellcheck source=tests/lib.sh
@@ -75,7 +76,7 @@ SH
   printf '%s\n' "$root"
 }
 
-# Exact observed 1.4.141 shapes -----------------------------------------------
+# Exact observed 1.4.143 shapes -----------------------------------------------
 
 list_json() {  # <handle:paneish> ... -> terminal list result with pty: placeholder tab/leaf ids
   local entries='' handle

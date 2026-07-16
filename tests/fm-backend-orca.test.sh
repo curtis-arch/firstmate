@@ -157,6 +157,12 @@ test_worktree_presence_taxonomy_is_strict_and_endpoint_independent() {
     bash -c '. "$0/bin/backends/orca.sh"; fm_backend_orca_worktree_presence wt-gone' "$ROOT" )
   [ "$out" = possible-external-destruction ] || fail "exact worktree_not_found under a ready runtime should be possible-external-destruction, got '$out'"
 
+  orca_case presence-absent-selector
+  printf '{"ok":false,"error":{"code":"selector_not_found","message":"selector_not_found"}}\n' > "$RESP/1.out"
+  out=$( PATH="$FB:$PATH" FM_ORCA_LOG="$LOG" FM_ORCA_RESPONSES="$RESP" \
+    bash -c '. "$0/bin/backends/orca.sh"; fm_backend_orca_worktree_presence wt-gone' "$ROOT" )
+  [ "$out" = possible-external-destruction ] || fail "exact selector_not_found under a ready runtime should be possible-external-destruction, got '$out'"
+
   orca_case presence-live-no-endpoint
   printf '{"ok":true,"result":{"worktree":{"id":"wt-live","path":"/tmp/wt-live"}}}\n' > "$RESP/1.out"
   out=$( PATH="$FB:$PATH" FM_ORCA_LOG="$LOG" FM_ORCA_RESPONSES="$RESP" \
@@ -184,6 +190,12 @@ test_worktree_presence_taxonomy_is_strict_and_endpoint_independent() {
   out=$( PATH="$FB:$PATH" FM_ORCA_LOG="$LOG" FM_ORCA_RESPONSES="$RESP" \
     bash -c '. "$0/bin/backends/orca.sh"; fm_backend_orca_worktree_presence wt-maybe' "$ROOT" )
   [ "$out" = unknown ] || fail "a stale-terminal error must remain unknown, got '$out'"
+
+  orca_case presence-unrecognized-worktree-error
+  printf '{"ok":false,"error":{"code":"worktree_lookup_failed","message":"transient lookup failure"}}\n' > "$RESP/1.out"
+  out=$( PATH="$FB:$PATH" FM_ORCA_LOG="$LOG" FM_ORCA_RESPONSES="$RESP" \
+    bash -c '. "$0/bin/backends/orca.sh"; fm_backend_orca_worktree_presence wt-maybe' "$ROOT" )
+  [ "$out" = unknown ] || fail "an unrecognized worktree error must remain unknown, got '$out'"
 
   orca_case presence-malformed-show
   printf 'not-json\n' > "$RESP/1.out"
@@ -1936,7 +1948,7 @@ orca_parent_child_inventory_selects_only_exact_observed_coordinator_pane() {
   printf '{"ok":true,"result":{"worktrees":[{"worktreeId":"repo::/scratch","agents":[{"paneKey":"33333333-3333-4333-8333-333333333333:44444444-4444-4444-8444-444444444444","state":"working","parentPaneKey":"11111111-1111-4111-8111-111111111111:22222222-2222-4222-8222-222222222222"},{"paneKey":"11111111-1111-4111-8111-111111111111:22222222-2222-4222-8222-222222222222","state":"done"}]}]}}\n' > "$RESP/2.out"
   snapshot=$( PATH="$FB:$PATH" FM_ORCA_LOG="$LOG" FM_ORCA_RESPONSES="$RESP" \
     bash -c '. "$0/bin/fm-backend.sh"; fm_backend_source orca; fm_backend_orca_agent_snapshot term-recorded repo::/scratch' "$ROOT" )
-  [ "$snapshot" = done ] || fail "parent/child relation overrode exact coordinator paneKey equality: '$snapshot'"
+  [ "$snapshot" = "done" ] || fail "parent/child relation overrode exact coordinator paneKey equality: '$snapshot'"
   pass "orca_parent_child_inventory_selects_only_exact_observed_coordinator_pane"
 }
 

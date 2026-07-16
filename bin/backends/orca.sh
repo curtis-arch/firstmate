@@ -52,9 +52,9 @@ process.exit(1);
 
 # Classify one recorded Orca worktree without consulting its terminal endpoint.
 # `possible-external-destruction` requires both a reachable/ready runtime and
-# Orca's exact worktree_not_found error for the recorded id. Every command
-# failure, malformed or unverified shape, runtime outage, and other error stays
-# unknown. This separation is important on Orca 1.4.141, where daemon
+# Orca's exact worktree_not_found or selector_not_found error for the recorded id.
+# Every command failure, malformed or unverified shape, runtime outage, and other
+# error stays unknown. This separation is important on Orca 1.4.141, where daemon
 # replacement can remove a PTY without writing task status: an endpoint-gone
 # result is never evidence that the worktree itself was destroyed.
 fm_backend_orca_worktree_presence() {  # <recorded-worktree-id> -> present|possible-external-destruction|unknown
@@ -81,7 +81,8 @@ let data;
 try { data = JSON.parse(fs.readFileSync(0, "utf8")); } catch (_) { process.stdout.write("unknown"); process.exit(0); }
 if (data.ok === false) {
   const code = data.error && data.error.code;
-  process.stdout.write(code === "worktree_not_found" ? "possible-external-destruction" : "unknown");
+  const absent = code === "worktree_not_found" || code === "selector_not_found";
+  process.stdout.write(absent ? "possible-external-destruction" : "unknown");
   process.exit(0);
 }
 if (data.ok !== true || !data.result) { process.stdout.write("unknown"); process.exit(0); }
