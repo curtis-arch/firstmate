@@ -105,7 +105,7 @@ Stale-handle recovery:
 External worktree destruction detection:
 
 - `fm_backend_orca_worktree_presence` owns the exact taxonomy: `present`, `possible-external-destruction`, or `unknown`.
-- `possible-external-destruction` requires `orca status --json` to report a reachable, ready runtime and `orca worktree show --worktree id:<recorded-id> --json` to return the exact `worktree_not_found` error code.
+- `possible-external-destruction` requires `orca status --json` to report a reachable, ready runtime and `orca worktree show --worktree id:<recorded-id> --json` to return the exact `worktree_not_found` or `selector_not_found` error code.
 - Runtime errors, malformed JSON, transient unavailability, missing metadata, mismatched success payloads, stale terminal handles, and every other error remain `unknown`.
 - The probe never consults `terminal list`, so cross-host terminal-list limitations cannot become destruction evidence.
 - `fm-watch.sh` probes every live Orca task record independently of terminal capture and emits a distinct `possible-external-destruction` wake naming the Firstmate task.
@@ -316,6 +316,227 @@ The detached Orca terminal daemon was also directly observed to predate the curr
 
 The implementation therefore treats restart survival as source-backed and fail-closed rather than as directly observed runtime behavior.
 If the pane key did not survive, recovery returns zero matches and preserves metadata; it cannot bind another endpoint without exact unique worktree and pane-key equality.
+
+### Orca 1.4.143 compatibility verification (2026-07-16)
+
+This verification used the installed application without restarting Orca.
+The version and readiness checks returned:
+
+```console
+$ mdls -name kMDItemVersion /Applications/Orca.app
+kMDItemVersion = "1.4.143"
+$ orca status --json | jq '{ok,result:{app:.result.app,runtime:.result.runtime,graph:.result.graph}}'
+{
+  "ok": true,
+  "result": {
+    "app": {
+      "running": true,
+      "pid": 18766,
+      "desktopWindowStatus": "available"
+    },
+    "runtime": {
+      "state": "ready",
+      "reachable": true,
+      "runtimeId": "9554036d-bbf4-4d15-844c-38dccc237c22"
+    },
+    "graph": {
+      "state": "ready"
+    }
+  }
+}
+```
+
+A disposable worktree created from commit `e29d4af3c43e0b03a4a63160e4b1097fd20c02c9` returned no embedded terminal object, so Firstmate's existing explicit terminal-creation fallback remains required:
+
+```console
+$ orca worktree create --repo id:69c04545-e3dd-467f-9b35-0eb698cc41a7 --name fm-orca-143-doc-probe-v7 --base-branch e29d4af3c43e0b03a4a63160e4b1097fd20c02c9 --no-parent --setup skip --json | jq '{ok,result:{worktree:{id:.result.worktree.id,path:.result.worktree.path,branch:.result.worktree.branch,baseRef:.result.worktree.baseRef},terminal:(.result.terminal // null),warnings:.result.warnings}}'
+{
+  "ok": true,
+  "result": {
+    "worktree": {
+      "id": "69c04545-e3dd-467f-9b35-0eb698cc41a7::/Users/johncurtis/orca/workspaces/firstmate/fm-orca-143-doc-probe-v7",
+      "path": "/Users/johncurtis/orca/workspaces/firstmate/fm-orca-143-doc-probe-v7",
+      "branch": "refs/heads/curtis-arch/fm-orca-143-doc-probe-v7",
+      "baseRef": "e29d4af3c43e0b03a4a63160e4b1097fd20c02c9"
+    },
+    "terminal": null,
+    "warnings": []
+  }
+}
+$ orca worktree show --worktree id:69c04545-e3dd-467f-9b35-0eb698cc41a7::/Users/johncurtis/orca/workspaces/firstmate/fm-orca-143-doc-probe-v7 --json | jq '{ok,result:{worktree:{id:.result.worktree.id,path:.result.worktree.path,branch:.result.worktree.branch}}}'
+{
+  "ok": true,
+  "result": {
+    "worktree": {
+      "id": "69c04545-e3dd-467f-9b35-0eb698cc41a7::/Users/johncurtis/orca/workspaces/firstmate/fm-orca-143-doc-probe-v7",
+      "path": "/Users/johncurtis/orca/workspaces/firstmate/fm-orca-143-doc-probe-v7",
+      "branch": "refs/heads/curtis-arch/fm-orca-143-doc-probe-v7"
+    }
+  }
+}
+$ orca worktree ps --json | jq --arg wt '69c04545-e3dd-467f-9b35-0eb698cc41a7::/Users/johncurtis/orca/workspaces/firstmate/fm-orca-143-doc-probe-v7' '{ok,result:{worktrees:[.result.worktrees[] | select(.worktreeId == $wt) | {worktreeId,path,branch,liveTerminalCount,agents}]}}'
+{
+  "ok": true,
+  "result": {
+    "worktrees": [
+      {
+        "worktreeId": "69c04545-e3dd-467f-9b35-0eb698cc41a7::/Users/johncurtis/orca/workspaces/firstmate/fm-orca-143-doc-probe-v7",
+        "path": "/Users/johncurtis/orca/workspaces/firstmate/fm-orca-143-doc-probe-v7",
+        "branch": "refs/heads/curtis-arch/fm-orca-143-doc-probe-v7",
+        "liveTerminalCount": 1,
+        "agents": []
+      }
+    ]
+  }
+}
+```
+
+An independent 1.4.143 probe also reconfirmed the accepted E1b agent join against an active Codex task.
+Its recorded terminal `term_97984248-f7e7-4fd7-a568-06a02ca30af9` and pane key `3522b4be-ba88-4719-97cf-0e74e67bbd88:2deb1457-266f-4f3a-9a2d-6137b4b80f12` resolved through `terminal show` to the exact recorded worktree and the same UUID `tabId:leafId`.
+The exact worktree's `worktree ps` inventory contained exactly one matching row:
+
+```json
+{"paneKey":"3522b4be-ba88-4719-97cf-0e74e67bbd88:2deb1457-266f-4f3a-9a2d-6137b4b80f12","state":"working","agentType":"codex"}
+```
+
+A disposable child terminal in the task worktree produced the creation handle and durable pane key in the existing accepted shape:
+
+```console
+$ orca terminal create --worktree id:69c04545-e3dd-467f-9b35-0eb698cc41a7::/Users/johncurtis/orca/workspaces/firstmate/fm-orca-143-compat-v7 --title fm-orca-143-doc-descendant-v7 --command "sh -c 'sleep 300 & child=\$!; printf \"ORCA143_PARENT=%s ORCA143_CHILD=%s\\n\" \"\$\$\" \"\$child\"; wait \"\$child\"'" --json | jq '{ok,result}'
+{
+  "ok": true,
+  "result": {
+    "terminal": {
+      "handle": "term_2727988e-72fd-4c01-8e26-1cce11593bd9",
+      "tabId": "50b26c40-734f-4c40-a793-6d8fcb6c9a09",
+      "paneKey": "50b26c40-734f-4c40-a793-6d8fcb6c9a09:da349f72-d1be-42e5-b4dc-af4ea58f3bea",
+      "ptyId": "69c04545-e3dd-467f-9b35-0eb698cc41a7::/Users/johncurtis/orca/workspaces/firstmate/fm-orca-143-compat-v7@@c896d6d2",
+      "worktreeId": "69c04545-e3dd-467f-9b35-0eb698cc41a7::/Users/johncurtis/orca/workspaces/firstmate/fm-orca-143-compat-v7",
+      "title": "fm-orca-143-doc-descendant-v7",
+      "surface": "visible"
+    }
+  }
+}
+$ orca terminal list --worktree id:69c04545-e3dd-467f-9b35-0eb698cc41a7::/Users/johncurtis/orca/workspaces/firstmate/fm-orca-143-compat-v7 --json | jq --arg h term_2727988e-72fd-4c01-8e26-1cce11593bd9 '{ok,result:{terminals:[.result.terminals[] | select(.handle == $h) | {handle,worktreeId,tabId,leafId,connected,writable,preview}]}}'
+{
+  "ok": true,
+  "result": {
+    "terminals": [
+      {
+        "handle": "term_2727988e-72fd-4c01-8e26-1cce11593bd9",
+        "worktreeId": "69c04545-e3dd-467f-9b35-0eb698cc41a7::/Users/johncurtis/orca/workspaces/firstmate/fm-orca-143-compat-v7",
+        "tabId": "pty:69c04545-e3dd-467f-9b35-0eb698cc41a7::/Users/johncurtis/orca/workspaces/firstmate/fm-orca-143-compat-v7@@c896d6d2",
+        "leafId": "pty:69c04545-e3dd-467f-9b35-0eb698cc41a7::/Users/johncurtis/orca/workspaces/firstmate/fm-orca-143-compat-v7@@c896d6d2",
+        "connected": true,
+        "writable": true,
+        "preview": "ORCA143_PARENT=2534 ORCA143_CHILD=2535"
+      }
+    ]
+  }
+}
+$ orca terminal show --terminal term_2727988e-72fd-4c01-8e26-1cce11593bd9 --json | jq '{ok,result:{terminal:{handle:.result.terminal.handle,worktreeId:.result.terminal.worktreeId,tabId:.result.terminal.tabId,leafId:.result.terminal.leafId,connected:.result.terminal.connected,writable:.result.terminal.writable,preview:.result.terminal.preview}}}'
+{
+  "ok": true,
+  "result": {
+    "terminal": {
+      "handle": "term_2727988e-72fd-4c01-8e26-1cce11593bd9",
+      "worktreeId": "69c04545-e3dd-467f-9b35-0eb698cc41a7::/Users/johncurtis/orca/workspaces/firstmate/fm-orca-143-compat-v7",
+      "tabId": "50b26c40-734f-4c40-a793-6d8fcb6c9a09",
+      "leafId": "da349f72-d1be-42e5-b4dc-af4ea58f3bea",
+      "connected": true,
+      "writable": true,
+      "preview": "ORCA143_PARENT=2534 ORCA143_CHILD=2535"
+    }
+  }
+}
+$ orca terminal read --terminal term_2727988e-72fd-4c01-8e26-1cce11593bd9 --limit 20 --json | jq '{ok,result}'
+{
+  "ok": true,
+  "result": {
+    "terminal": {
+      "handle": "term_2727988e-72fd-4c01-8e26-1cce11593bd9",
+      "status": "running",
+      "tail": [
+        "",
+        "ORCA143_PARENT=2534 ORCA143_CHILD=2535"
+      ],
+      "truncated": false,
+      "limited": false,
+      "oldestCursor": "0",
+      "nextCursor": "2",
+      "latestCursor": "2",
+      "returnedLineCount": 2
+    }
+  }
+}
+```
+
+The parent and descendant existed before close, `terminal close` reported `ptyKilled: true`, the same `ps` command produced no rows one second later, and worktree-scoped terminal enumeration no longer contained the handle:
+
+```console
+$ ps -p 2534,2535 -o pid=,ppid=,stat=,command=
+ 2534  1910 S+   sh -c sleep 300 & child=$!; printf "ORCA143_PARENT=%s ORCA143_CHILD=%s\n" "$$" "$child"; wait "$child"
+ 2535  2534 S+   sleep 300
+$ orca terminal close --terminal term_2727988e-72fd-4c01-8e26-1cce11593bd9 --json | jq '{ok,result}'
+{
+  "ok": true,
+  "result": {
+    "close": {
+      "handle": "term_2727988e-72fd-4c01-8e26-1cce11593bd9",
+      "tabId": "50b26c40-734f-4c40-a793-6d8fcb6c9a09",
+      "ptyKilled": true
+    }
+  }
+}
+$ sleep 1; ps -p 2534,2535 -o pid=,ppid=,stat=,command=
+$ orca terminal list --worktree id:69c04545-e3dd-467f-9b35-0eb698cc41a7::/Users/johncurtis/orca/workspaces/firstmate/fm-orca-143-compat-v7 --json | jq --arg h term_2727988e-72fd-4c01-8e26-1cce11593bd9 '{ok,result:{terminals:[.result.terminals[] | select(.handle == $h)]}}'
+{
+  "ok": true,
+  "result": {
+    "terminals": []
+  }
+}
+```
+
+The independent probe additionally observed the just-closed handle remain temporarily showable with `connected:false` and `writable:false` after it disappeared from `terminal list`.
+This reconfirms the existing rule that disconnected show results are not live recovery candidates.
+
+The safe stale-handle probe retained the historical `terminal_handle_stale` code.
+After the disposable worktree was removed successfully, querying its exact formerly recorded ID returned `selector_not_found` instead of the older `worktree_not_found` code:
+
+```console
+$ orca terminal show --terminal term_00000000-0000-4000-8000-000000000000 --json | jq '{ok,error}'
+{
+  "ok": false,
+  "error": {
+    "code": "terminal_handle_stale",
+    "message": "terminal_handle_stale"
+  }
+}
+$ orca worktree rm --worktree id:69c04545-e3dd-467f-9b35-0eb698cc41a7::/Users/johncurtis/orca/workspaces/firstmate/fm-orca-143-doc-probe-v7 --force --json | jq '{ok,result}'
+{
+  "ok": true,
+  "result": {
+    "removed": true
+  }
+}
+$ orca worktree show --worktree id:69c04545-e3dd-467f-9b35-0eb698cc41a7::/Users/johncurtis/orca/workspaces/firstmate/fm-orca-143-doc-probe-v7 --json | jq '{ok,error}'
+{
+  "ok": false,
+  "error": {
+    "code": "selector_not_found",
+    "message": "selector_not_found"
+  }
+}
+```
+
+The adapter therefore accepts `selector_not_found` only at the same final classification point as `worktree_not_found`, after readiness succeeds and the lookup uses the exact recorded worktree ID.
+Malformed JSON, runtime unavailability, mismatched success payloads, stale terminal errors, and every other error code still remain `unknown`.
+
+An independent shared-team readiness probe found that `terminal wait --for tui-idle` can report `satisfied:true` while Codex is stopped at its update prompt and absent from the worktree's `agents[]` inventory.
+That successful false-positive probe does not explain two earlier 60-second TUI-idle timeouts, whose cause remains inconclusive.
+No compatibility behavior changes were made from that evidence; a future readiness change needs a separate focused design that does not risk sending the team contract into a startup dialog.
+Pane-key survival across an actual Orca restart remains unverified because this compatibility run did not restart Orca.
 
 ### Earlier adapter smoke
 
