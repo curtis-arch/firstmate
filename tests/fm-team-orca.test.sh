@@ -772,6 +772,7 @@ test_teardown_closes_team_panes_before_worktree_removal() {
     "window=fm-$id" "generation=gen-1" "terminal=term_coord" "worktree=$wt" "project=$proj" \
     "harness=claude" "kind=scout" "mode=no-mistakes" "yolo=off" \
     "backend=orca" "orca_worktree_id=$WTID" "orca_pane_key=$COORD_PANE" \
+    "decisions_reviewed=1" "decision_keys=" \
     "team_edit_policy=coordinator-only" \
     "orca_team_pane_keys=$MATE_PANE" "orca_team_terminals=term_mate_1" \
     "orca_team_cleanup_terminals=term_cleanup_1"
@@ -824,6 +825,7 @@ test_teardown_refuses_unprovable_team_pane() {
     "window=fm-$id" "generation=gen-1" "terminal=term_coord" "worktree=$wt" "project=$proj" \
     "harness=claude" "kind=scout" "mode=no-mistakes" "yolo=off" \
     "backend=orca" "orca_worktree_id=$WTID" "orca_pane_key=$COORD_PANE" \
+    "decisions_reviewed=1" "decision_keys=" \
     "orca_team_pane_keys=$MATE_PANE" "orca_team_terminals=term_mate_1"
   orca_case team-teardown-refuse
   printf '{"ok":true,"result":{"worktree":{"id":"%s","path":"%s"}}}\n' "$WTID" "$wt" > "$RESP/1.out"
