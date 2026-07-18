@@ -800,7 +800,9 @@ test_teardown_passes_recorded_tab_id_to_zellij_kill() {
     "zellij_tab_id=3" \
     "worktree=$dir/missing-worktree" \
     "project=$project" \
-    "kind=scout"
+    "kind=scout" \
+    "decisions_reviewed=1" \
+    "decision_keys="
   printf '[]\n' > "$dir/responses/1.out"
   printf '[{"tab_id":3,"name":"fm-zghost"}]\n' > "$dir/responses/2.out"
   fb=$(make_zellij_fakebin "$dir")
@@ -843,9 +845,10 @@ test_forced_secondmate_teardown_kills_zellij_children_with_child_home_tag() {
   # Keep those parent probes absent before supplying the child-home pane shape.
   printf '[]\n' > "$dir/responses/1.out"
   printf '[]\n' > "$dir/responses/2.out"
-  zellij_pane_response "$dir" 3 7 4
-  zellij_tab_response "$dir" 4 4 "$child_title"
-  printf '[]\n' > "$dir/responses/5.out"
+  printf '[]\n' > "$dir/responses/3.out"
+  zellij_pane_response "$dir" 4 7 4
+  zellij_tab_response "$dir" 5 4 "$child_title"
+  printf '[]\n' > "$dir/responses/6.out"
   fb=$(make_zellij_fakebin "$dir")
   out=$( PATH="$fb:$PATH" FM_STATE_OVERRIDE="$state" FM_DATA_OVERRIDE="$data" FM_CONFIG_OVERRIDE="$config" \
     FM_ROOT_OVERRIDE="$ROOT" \

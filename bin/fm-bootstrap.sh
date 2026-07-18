@@ -10,18 +10,18 @@
 #                 "CREW_DISPATCH: invalid config/crew-dispatch.json - <reason>",
 #                 "CREW_DISPATCH: active config/crew-dispatch.json" plus indented rules,
 #                 "FLEET_SYNC: <repo>: skipped|recovered|STUCK: <detail>",
+#                 "PR_CHECK_MIGRATION: <private remediation>",
 #                 "TASKS_AXI: available", "TANGLE: <remediation>",
 #                 "SECONDMATE_SYNC: secondmate <id>: skipped: <reason>",
-#                 "NUDGE_SECONDMATES: fm-<id>...",
+#                 "NUDGE_SECONDMATES: secondmate <id>: send failed: <reason>",
+#                 "BOOTSTRAP_INFO: nudged fm-<id> with '<message>'",
 #                 "SECONDMATE_LIVENESS: secondmate <id>: already-live|respawned|skipped: <reason>|respawn failed: <reason>",
 #                 "FMX: X mode on ..." or "FMX: X mode off ...".
-#          A NUDGE_SECONDMATES line lists the RUNNING secondmate task selectors
-#          (fm-<id>) whose worktree was fast-forwarded to firstmate's own
-#          current default-branch commit (a purely LOCAL fast-forward, never an
-#          origin fetch) AND whose instruction surface (AGENTS.md, bin/, or
-#          .agents/skills/) actually changed; firstmate nudges each via
-#          bin/fm-send.sh fm-<id> so meta resolves the current backend target
-#          even when the same bootstrap run also respawned the secondmate.
+#          When a running secondmate's loaded instruction surface advances,
+#          bootstrap immediately sends the marked reread nudge through the
+#          stable fm-<id> selector. A successful send reports BOOTSTRAP_INFO;
+#          a failed send leaves a validated retry marker under
+#          state/.secondmate-nudge-pending/ and reports NUDGE_SECONDMATES.
 #          Already-current or no-instruction-change homes are silently left alone.
 #          The secondmate sweep also propagates declared inheritable local config
 #          into each validated live secondmate home.
@@ -65,16 +65,17 @@
 #          refresh relays any completed fm-fleet-sync.sh output before the
 #          aggregate timeout skip line with timeout and elapsed seconds.
 #          Set FM_FLEET_PRUNE=0 to skip branch pruning during that refresh.
-#          Set FM_BOOTSTRAP_DETECT_ONLY=1 to skip the four MUTATING sweeps
-#          (secondmate_sync, secondmate_liveness_sweep, x_mode_setup,
-#          fleet_sync) while still printing every read-only detect line
+#          Set FM_BOOTSTRAP_DETECT_ONLY=1 to skip the five MUTATING sweeps
+#          (PR-check migration, secondmate_sync, secondmate_liveness_sweep,
+#          x_mode_setup, fleet_sync) while still printing every read-only detect line
 #          above; the TANGLE line switches to advisory-only wording with no
 #          checkout command. Used by
 #          fm-session-start.sh's read-only path when another live session holds
 #          the fleet lock, so a second concurrent session never race-mutates
-#          secondmate homes, X-mode artifacts, project clones, or repair
-#          instructions. Unset/0 (the default) runs every sweep exactly as
-#          before - this flag is purely additive.
+#          PR-check artifacts, secondmate homes, X-mode artifacts, project
+#          clones, or repair instructions.
+#          Unset/0 (the default) runs every sweep exactly as before - this flag
+#          is purely additive.
 #        fm-bootstrap.sh install <tool>...
 #          Install the named tools (only ones the captain approved).
 set -u
@@ -188,12 +189,11 @@ secondmate_sync() {
   # to the primary checkout's current default-branch commit. Purely LOCAL - no
   # fetch, no origin dependency: a linked-worktree home already holds the primary's
   # commit (fm-ff-lib.sh), while a standalone clone without it is skipped until
-  # /updatefirstmate refreshes it from origin. Emits NUDGE_SECONDMATES:
-  # only for RUNNING secondmates whose instruction surface (AGENTS.md, bin/, or
+  # /updatefirstmate refreshes it from origin. Startup sends reread nudges only
+  # for RUNNING secondmates whose instruction surface (AGENTS.md, bin/, or
   # .agents/skills/) actually changed, so a secondmate already on the primary's
-  # version is never disturbed (AGENTS.md bootstrap + supervision). Mirrors
-  # fm-update's nudge-secondmates: report so firstmate can live-converge the
-  # listed fm-<id> selectors.
+  # version is never disturbed. Successful sends are informational; failed sends
+  # remain durable and actionable until a validated retry succeeds.
   [ -d "$STATE" ] || return 0
   local primary_head
   if ! primary_head=$(primary_head_commit "$FM_ROOT"); then
@@ -208,15 +208,127 @@ secondmate_sync() {
   fi
   FF_NUDGE_WINDOWS=""
   FF_SEEN_HOMES=""
+  SECOND_MATE_NUDGE_MESSAGE='firstmate was updated to the latest - please re-read your AGENTS.md to pick up the new instructions.'
+  SECOND_MATE_NUDGE_PENDING_DIR="$STATE/.secondmate-nudge-pending"
+
+  secondmate_nudge_marker_path() {
+    case "$1" in
+      *[!/A-Za-z0-9._-]*|""|*/*) return 1 ;;
+    esac
+    printf '%s/%s.pending' "$SECOND_MATE_NUDGE_PENDING_DIR" "$1"
+  }
+
+  secondmate_write_nudge_marker() {
+    local id=$1 home=$2 commit=$3 instr=$4 selector marker tmp parent
+    selector="fm-$id"
+    marker=$(secondmate_nudge_marker_path "$id") || return 1
+    parent=${marker%/*}
+    mkdir -p "$parent" || return 1
+    tmp=$(mktemp "$parent/.nudge.XXXXXX" 2>/dev/null) || return 1
+    {
+      printf 'id=%s\n' "$id"
+      printf 'selector=%s\n' "$selector"
+      printf 'home=%s\n' "$home"
+      printf 'commit=%s\n' "$commit"
+      printf 'instructions=%s\n' "$instr"
+      printf 'message=%s\n' "$SECOND_MATE_NUDGE_MESSAGE"
+    } > "$tmp" || { rm -f "$tmp"; return 1; }
+    mv -f "$tmp" "$marker" || { rm -f "$tmp"; return 1; }
+  }
+
+  secondmate_send_nudge() {
+    local id=$1 home=$2 commit=$3 instr=$4 selector marker out
+    selector="fm-$id"
+    marker=$(secondmate_nudge_marker_path "$id") || {
+      echo "NUDGE_SECONDMATES: secondmate $id: send failed: unsafe id"
+      return 0
+    }
+    if ! secondmate_write_nudge_marker "$id" "$home" "$commit" "$instr"; then
+      echo "NUDGE_SECONDMATES: secondmate $id: send failed: cannot record retry marker"
+      return 0
+    fi
+    if out=$(FM_HOME="$FM_HOME" FM_ROOT_OVERRIDE="$FM_ROOT" FM_STATE_OVERRIDE="$STATE" "$SCRIPT_DIR/fm-send.sh" "$selector" "$SECOND_MATE_NUDGE_MESSAGE" 2>&1); then
+      rm -f "$marker"
+      echo "BOOTSTRAP_INFO: nudged $selector with '$SECOND_MATE_NUDGE_MESSAGE'"
+    else
+      echo "NUDGE_SECONDMATES: secondmate $id: send failed: $(first_line "$out")"
+    fi
+  }
+
+  fm_ff_after_instruction_update() {
+    local id=$1 home=$2 _window=$3 instr=$4
+    secondmate_send_nudge "$id" "$home" "$primary_head" "$instr"
+  }
+
+  secondmate_retry_pending_nudges() {
+    local marker id selector home commit message expected_marker meta meta_home home_real head out
+    [ -d "$SECOND_MATE_NUDGE_PENDING_DIR" ] || return 0
+    for marker in "$SECOND_MATE_NUDGE_PENDING_DIR"/*.pending; do
+      [ -f "$marker" ] || continue
+      id=$(fm_meta_get "$marker" id)
+      if ! expected_marker=$(secondmate_nudge_marker_path "$id"); then
+        echo "NUDGE_SECONDMATES: secondmate ${id:-unknown}: send failed: retry marker has unsafe id"
+        continue
+      fi
+      [ "$expected_marker" = "$marker" ] || {
+        echo "NUDGE_SECONDMATES: secondmate $id: send failed: retry marker filename mismatch"
+        continue
+      }
+      selector=$(fm_meta_get "$marker" selector)
+      home=$(fm_meta_get "$marker" home)
+      commit=$(fm_meta_get "$marker" commit)
+      message=$(fm_meta_get "$marker" message)
+      [ "$selector" = "fm-$id" ] || {
+        echo "NUDGE_SECONDMATES: secondmate ${id:-unknown}: send failed: retry marker selector mismatch"
+        continue
+      }
+      [ "$message" = "$SECOND_MATE_NUDGE_MESSAGE" ] || {
+        echo "NUDGE_SECONDMATES: secondmate ${id:-unknown}: send failed: retry marker message mismatch"
+        continue
+      }
+      meta="$STATE/$id.meta"
+      [ -f "$meta" ] && [ "$(fm_meta_get "$meta" kind)" = secondmate ] || {
+        echo "NUDGE_SECONDMATES: secondmate ${id:-unknown}: send failed: retry target has no live secondmate metadata"
+        continue
+      }
+      meta_home=$(fm_meta_get "$meta" home)
+      [ -n "$meta_home" ] || meta_home=$(secondmate_registry_field "$FM_HOME/data/secondmates.md" "$id" home || true)
+      if ! validate_secondmate_home "$id" "$meta_home"; then
+        echo "NUDGE_SECONDMATES: secondmate $id: send failed: retry target home unsafe: $VALIDATION_ERROR"
+        continue
+      fi
+      home_real="$VALIDATED_HOME"
+      [ "$home_real" = "$home" ] || {
+        echo "NUDGE_SECONDMATES: secondmate $id: send failed: retry target home changed"
+        continue
+      }
+      head=$(git -C "$home_real" rev-parse HEAD 2>/dev/null || true)
+      [ -n "$head" ] && [ "$head" = "$commit" ] || {
+        echo "NUDGE_SECONDMATES: secondmate $id: send failed: retry target is not at recorded instruction commit"
+        continue
+      }
+      if out=$(FM_HOME="$FM_HOME" FM_ROOT_OVERRIDE="$FM_ROOT" FM_STATE_OVERRIDE="$STATE" "$SCRIPT_DIR/fm-send.sh" "$selector" "$SECOND_MATE_NUDGE_MESSAGE" 2>&1); then
+        rm -f "$marker"
+        echo "BOOTSTRAP_INFO: nudged $selector with '$SECOND_MATE_NUDGE_MESSAGE'"
+      else
+        echo "NUDGE_SECONDMATES: secondmate $id: send failed: $(first_line "$out")"
+      fi
+    done
+  }
+
   local tmp line
+  secondmate_retry_pending_nudges
   tmp=$(mktemp "${TMPDIR:-/tmp}/fm-secondmate-sync.XXXXXX" 2>/dev/null) || return 0
   sweep_live_secondmate_metas "$STATE" "$primary_head" yes >"$tmp"
   while IFS= read -r line; do
     case "$line" in
       secondmate\ *': skipped:'*) echo "SECONDMATE_SYNC: $line" ;;
+      BOOTSTRAP_INFO:\ *) echo "$line" ;;
+      NUDGE_SECONDMATES:\ *) echo "$line" ;;
     esac
   done < "$tmp"
   rm -f "$tmp"
+  unset -f fm_ff_after_instruction_update
   # Inheritable-config propagation: push the primary's declared LOCAL config
   # into every VALIDATED live secondmate home swept
   # above (FF_SEEN_HOMES is exactly that set). config/ is gitignored, so this is a
@@ -241,7 +353,6 @@ secondmate_sync() {
       echo "SECONDMATE_SYNC: secondmate $id: skipped: config inheritance failed"
     fi
   done < <(live_secondmate_meta_records "$STATE" "$FM_HOME/data/secondmates.md")
-  [ -n "$FF_NUDGE_WINDOWS" ] && echo "NUDGE_SECONDMATES:$FF_NUDGE_WINDOWS"
   return 0
 }
 
@@ -384,19 +495,67 @@ no_mistakes_compatible() {
   [ "$patch" -ge "$NO_MISTAKES_MIN_PATCH" ]
 }
 
-# Write CONTENT to DEST only when it differs, so re-running bootstrap does not
-# churn mtimes or duplicate generated files (idempotence).
-write_if_changed() {
-  local dest=$1 content=$2
-  [ -f "$dest" ] && [ "$(cat "$dest" 2>/dev/null)" = "$content" ] && return 0
-  printf '%s\n' "$content" > "$dest"
+x_mode_write_if_changed() {
+  local dest=$1 content=$2 mode=$3 parent tmp parent_device current_mode
+  parent=${dest%/*}
+  [ "$parent" != "$dest" ] || return 1
+  [ -d "$parent" ] && [ ! -L "$parent" ] || return 1
+  if [ "$(uname)" = Darwin ]; then
+    parent_device=$(stat -f %d "$parent" 2>/dev/null) || return 1
+  else
+    parent_device=$(stat -c %d "$parent" 2>/dev/null) || return 1
+  fi
+  if [ -e "$dest" ] || [ -L "$dest" ]; then
+    fmx_single_link_file_valid "$dest" "$parent_device" || return 1
+    if [ "$(uname)" = Darwin ]; then
+      current_mode=$(stat -f %Lp "$dest" 2>/dev/null) || return 1
+    else
+      current_mode=$(stat -c %a "$dest" 2>/dev/null) || return 1
+    fi
+    if [ "$current_mode" = "$mode" ] && cmp -s "$dest" <(printf '%s\n' "$content"); then
+      return 0
+    fi
+  fi
+  tmp=$(umask 077; mktemp "$parent/.fm-x-mode.XXXXXX" 2>/dev/null) || return 1
+  if ! printf '%s\n' "$content" > "$tmp" \
+    || ! chmod "$mode" "$tmp" \
+    || ! fmx_single_link_file_mode_valid "$tmp" "$mode" "$parent_device"; then
+    rm -f -- "$tmp"
+    return 1
+  fi
+  if { [ -e "$dest" ] || [ -L "$dest" ]; } \
+    && ! fmx_single_link_file_valid "$dest" "$parent_device"; then
+    rm -f -- "$tmp"
+    return 1
+  fi
+  if ! mv -f -- "$tmp" "$dest"; then
+    rm -f -- "$tmp"
+    return 1
+  fi
+  if ! fmx_single_link_file_mode_valid "$dest" "$mode" "$parent_device" \
+    || ! cmp -s "$dest" <(printf '%s\n' "$content"); then
+    rm -f -- "$dest"
+    return 1
+  fi
+}
+
+x_mode_artifact_present() {
+  [ -e "$1" ] || [ -L "$1" ]
+}
+
+x_mode_remove_artifact() {
+  local artifact=$1 parent=${1%/*}
+  x_mode_artifact_present "$artifact" || return 0
+  [ -d "$parent" ] && [ ! -L "$parent" ] || return 1
+  rm -f -- "$artifact" 2>/dev/null || return 1
+  ! x_mode_artifact_present "$artifact"
 }
 
 # X mode (opt-in): when this home's .env carries a non-empty FMX_PAIRING_TOKEN,
-# wire the relay poll into the EXISTING watcher check mechanism without touching
-# fm-watch.sh or any other watcher-backbone file. Drops two idempotent,
-# gitignored artifacts:
-#   state/x-watch.check.sh - check shim that execs bin/fm-x-poll.sh each cycle
+# wire the relay poll into the existing authenticated watcher dispatch.
+# Drops two idempotent, gitignored artifacts:
+#   state/x-watch.check.sh - byte-static identity shim; the watcher validates
+#                            its bytes and invokes bin/fm-x-poll.sh directly
 #   config/x-mode.env      - exports FM_CHECK_INTERVAL=30, sourced by the watcher
 #                            arm so only an X instance polls at the 30s cadence
 # On opt-out (no token, or empty) it removes any such artifacts so the instance
@@ -416,8 +575,10 @@ x_mode_setup() {
   [ -f "$env_file" ] && token=$(fmx_env_get FMX_PAIRING_TOKEN "$env_file")
 
   x_mode_remove_artifacts() {
-    rm -f "$shim" "$cadence" 2>/dev/null || true
-    [ ! -e "$shim" ] && [ ! -e "$cadence" ]
+    local failed=0
+    x_mode_remove_artifact "$shim" || failed=1
+    x_mode_remove_artifact "$cadence" || failed=1
+    [ "$failed" -eq 0 ]
   }
 
   x_mode_supervision_repair() {
@@ -430,7 +591,7 @@ x_mode_setup() {
   if [ -z "$token" ]; then
     # Opt-out (or never opted in): drop any X artifacts; stay silent unless we
     # actually removed something.
-    if [ -e "$shim" ] || [ -e "$cadence" ]; then
+    if x_mode_artifact_present "$shim" || x_mode_artifact_present "$cadence"; then
       if x_mode_remove_artifacts; then
         echo "FMX: X mode off - removed relay poll shim and 30s cadence; default cadence applies on the next supervision cycle; $(x_mode_supervision_repair)"
       else
@@ -448,7 +609,7 @@ x_mode_setup() {
     fi
   done
   if [ "$missing" -ne 0 ]; then
-    if [ -e "$shim" ] || [ -e "$cadence" ]; then
+    if x_mode_artifact_present "$shim" || x_mode_artifact_present "$cadence"; then
       if x_mode_remove_artifacts; then
         echo "FMX: X mode off - missing relay poll dependencies; install them and rerun bootstrap"
       else
@@ -468,16 +629,10 @@ x_mode_setup() {
 
   mkdir -p "$STATE" "$CONFIG" 2>/dev/null || { fmx_arm_failed; return 0; }
 
-  shim_body=$(cat <<EOF
-#!/usr/bin/env bash
-# Auto-generated by fm-bootstrap.sh - X mode connector poll shim.
-# The watcher runs this each check cycle; output becomes a check: wake.
-export FM_HOME=$(printf '%q' "$FM_HOME")
-exec $(printf '%q' "$FM_ROOT/bin/fm-x-poll.sh")
-EOF
-)
-  write_if_changed "$shim" "$shim_body" || { fmx_arm_failed; return 0; }
-  chmod +x "$shim" 2>/dev/null || { fmx_arm_failed; return 0; }
+  shim_body=$(fmx_poll_shim_content "$FM_HOME" "$FM_ROOT")
+  x_mode_write_if_changed "$shim" "$shim_body" 700 || { fmx_arm_failed; return 0; }
+  fmx_poll_shim_valid "$shim" "$FM_HOME" "$FM_ROOT" \
+    || { fmx_arm_failed; return 0; }
 
   cadence_body=$(cat <<'EOF'
 # Auto-generated by fm-bootstrap.sh - X mode watcher cadence.
@@ -487,7 +642,7 @@ EOF
 export FM_CHECK_INTERVAL=30
 EOF
 )
-  write_if_changed "$cadence" "$cadence_body" || { fmx_arm_failed; return 0; }
+  x_mode_write_if_changed "$cadence" "$cadence_body" 600 || { fmx_arm_failed; return 0; }
 
   echo "FMX: X mode on - relay poll armed via state/x-watch.check.sh; 30s watcher cadence in config/x-mode.env"
 }
@@ -591,6 +746,14 @@ if [ "${1:-}" = "install" ]; then
     eval "$cmd"
   done
   exit 0
+fi
+
+# This is the first mutating sweep at a locked session boundary. It pauses an
+# identity-matched watcher, holds its lock, and neutralizes legacy PR checks
+# before any tool detection or later bootstrap mutation can leave old artifacts
+# runnable. Detect-only sessions never touch state.
+if [ "${FM_BOOTSTRAP_DETECT_ONLY:-0}" != 1 ]; then
+  "$SCRIPT_DIR/fm-pr-check-migrate.sh" || true
 fi
 
 if [ "$BACKEND_VALID" -eq 0 ]; then
