@@ -122,7 +122,7 @@ Teardown:
 
 - Teardown claims the recorded task generation before any destructive cleanup; recovery and metadata promotion refuse while that ownership is active.
 - A teardown interrupted by process death remains inactive until an operator explicitly resumes it with the recorded owner token; a live owner cannot be taken over.
-- Scout teardown still requires `data/<id>/report.md` unless `--force` is explicitly used.
+- Scout teardown still requires `data/<id>/report.md` and the shared unresolved-decision completion gate unless `--force` is explicitly used.
 - Ship teardown still refuses dirty or unlanded work before any terminal/worktree cleanup.
 - Ship teardown resolves `orca_worktree_id` back through Orca and verifies it matches the inspected `worktree=` path before removing anything; mismatches or uninspectable paths preserve metadata and fail closed.
 - After the existing firstmate safety checks pass, teardown closes the recorded Orca terminal and releases the recorded worktree through `orca worktree rm --worktree id:<orca_worktree_id> --force`.

@@ -21,9 +21,9 @@ test_delivery_unit_has_one_gate_owner() {
     "Validate contract does not require one named owner for the delivery unit"
   assert_contains "$contract" 'Implementation lanes self-review their scoped diff, run targeted tests, commit, and report completion' \
     "Validate contract does not require lane self-validation"
-  assert_contains "$contract" 'they never invoke `no-mistakes` independently' \
+  assert_contains "$contract" "they never invoke \`no-mistakes\` independently" \
     "Validate contract permits lane-local no-mistakes runs"
-  assert_contains "$contract" 'Only after that report may Firstmate explicitly steer the delivery owner to invoke one end-of-delivery `no-mistakes` gate' \
+  assert_contains "$contract" "Only after that report may Firstmate explicitly steer the delivery owner to invoke one end-of-delivery \`no-mistakes\` gate" \
     "Validate contract does not reserve one end gate for an explicit Firstmate steer"
   assert_contains "$contract" 'Secondmates use this same contract inside their isolated homes because they are Firstmates' \
     "Validate contract does not apply unchanged inside secondmate homes"
